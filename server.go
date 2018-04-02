@@ -1,26 +1,17 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"log"
 	"net"
 	"os"
 	"time"
 )
 
-type Packet struct {
-	op      uint8
-	buttons uint16
-	left    uint8
-	right   uint8
-	left1   int16
-	left2   int16
-	right1  int16
-	right2  int16
-}
-
 var events int = 0
-var clients map[*net.UDPAddr]bool = make(map[*net.UDPAddr]bool, 0)
+var clients = make(map[*net.UDPAddr]bool, 0)
 
 var dpads_map = map[byte]uint16{0: 0x1, 1: 0x9, 2: 0x8, 3: 0xA, 4: 0x2, 5: 0x6, 6: 0x4, 7: 0x5}
 var buttons_map = map[int]uint16{4: 0x4000, 5: 0x1000, 6: 0x2000, 7: 0x8000}
@@ -36,10 +27,6 @@ func set_if_true(value uint16, mask uint16, check bool) uint16 {
 	} else {
 		return value
 	}
-}
-
-func to_big(data uint16) []byte {
-	return []byte{byte(data % 256), byte(data >> 8)}
 }
 
 func clamp(v int32) int32 {
@@ -70,7 +57,7 @@ func correct_axis(v, min, max, dz int32) int32 {
 	return 0
 }
 
-func parse_and_map(hid []byte) []byte {
+func convert_hid_to_packet(hid []byte) []byte {
 	buttons := dpads_map[hid[5]%16]
 	for k, v := range buttons_map {
 		buttons = set_if_true(buttons, v, get_bit(hid, 5, uint(k)))
@@ -82,11 +69,14 @@ func parse_and_map(hid []byte) []byte {
 	r2_analog := byte(hid[9])
 
 	ret := []byte{1}
-	ret = append(ret, to_big(buttons)...)
+	bs := make([]byte, 2)
+	binary.LittleEndian.PutUint16(bs, buttons)
+	ret = append(ret, bs...)
 	ret = append(ret, l2_analog)
 	ret = append(ret, r2_analog)
 	for _, axis := range hid[1:5] {
-		ret = append(ret, to_big(uint16(correct_axis(int32(axis), 0, 255, 5)))...)
+		binary.LittleEndian.PutUint16(bs, uint16(correct_axis(int32(axis), 0, 255, 5)))
+		ret = append(ret, bs...)
 	}
 	return ret
 }
@@ -101,7 +91,7 @@ func reader(f *os.File, conn *net.UDPConn) {
 		if count != 78 && buffer[0] != 0x11 {
 			fmt.Printf("Bad buffer %v\n", buffer)
 		}
-		packet := parse_and_map(buffer[2:])
+		packet := convert_hid_to_packet(buffer[2:])
 		events = events + 1
 		for client := range clients {
 			conn.WriteTo(packet, client)
@@ -109,25 +99,31 @@ func reader(f *os.File, conn *net.UDPConn) {
 	}
 }
 
-func outputter() {
-	for {
-		//<- ch
-		//fmt.Printf("Read %d bytes\n", <-ch)
-	}
+func control(f *os.File) {
+	buffer := make([]byte, 74)
+	buffer[0] = 0x11
+	buffer[1] = 0xC0 | 4
+	buffer[3] = 0x07
+	buffer[9] = 0xFF
+	crc := crc32.Checksum(append([]byte{0xA2}, buffer...), crc32.IEEETable)
+	checksum := make([]byte, 4)
+	binary.LittleEndian.PutUint32(checksum, crc)
+	buf := append(buffer, checksum...)
+	f.Write(buf)
+	fmt.Println(buf)
 }
 
 func main() {
-	z := []byte{5, 2}
-	fmt.Printf("%v %v\n", get_bit(z, 0, 0), get_bit(z, 0, 2))
 	buf := make([]byte, 100)
-	file, err := os.Open("/dev/hidraw2") // For read access.
+	file, err := os.OpenFile("/dev/hidraw2", os.O_RDWR, 0644)
 	if err != nil {
 		log.Fatal(err)
 	}
-	ticker := time.NewTicker(time.Second * 5)
+	control(file)
+	ticker := time.NewTicker(time.Second * 10)
 	go func() {
 		for range ticker.C {
-			fmt.Printf("Events per second %d\n", events/5)
+			fmt.Printf("Events per second %v\n", events/10)
 			events = 0
 		}
 	}()
