@@ -5,18 +5,24 @@ from select import epoll, EPOLLIN
 import struct
 import binascii
 #import numpy
-import matplotlib.pyplot as plt
 
 prev = {"x": 0, "y": 0}
 
-report_fd = os.open("/dev/hidraw0", os.O_RDWR | os.O_NONBLOCK)
+report_fd = os.open("/dev/hidraw2", os.O_RDWR | os.O_NONBLOCK)
 tfd = FileIO(report_fd, "w+", closefd=False)
-
 reports = 0
 clients = {}
+controls = {
+    'small_rumble': 0,
+    'big_rumble': 0,
+    'r': 0,
+    'g': 0,
+    'b': 255,
+    'volume_l': 80,
+    'volume_r': 80
+}
 
 DEFAULT_LATENCY = 4
-
 
 def connection(data, addr, transport):
     print("connected %s %s" % addr)
@@ -24,11 +30,13 @@ def connection(data, addr, transport):
 
 def rumble(data, addr, transport):
     gamepad = data[1]
-    left = data[2]
-    right = data[3]
-    print("Rumble from %s: gamepad %d, left %d, right %d" %(
-          addr, gamepad, left, right))
-    control(left, right)
+    small = data[2]
+    big = data[3]
+    print("Rumble from %s: gamepad %d, small %d, big %d" %(
+          addr, gamepad, small, big))
+    controls['small_rumble'] = small
+    controls['big_rumble'] = big
+    control()
 
 def disconnect(data, addr, transport):
     print("Client %s %s disconnected" % addr)
@@ -82,42 +90,40 @@ convert = {
     "y": "triangle"
 }
 
-def control(big_rumble=0, small_rumble=0,
-            led_red=0, led_green=0, led_blue=0x40):
+def get_control(name):
+    return max(min(controls.pop(name, 0), 255), 0)
+
+def control():
     pkt = bytearray(74)
     pkt[0] = 0x11
     pkt[1] = 0xC0 | DEFAULT_LATENCY
     pkt[3] = 0x07
-    offset = 3
-    report_id = 0x11
-    pkt[offset+3] = min(small_rumble, 255)
-    pkt[offset+4] = min(big_rumble, 255)
-    pkt[offset+5] = min(led_red, 255)
-    pkt[offset+6] = min(led_green, 255)
-    pkt[offset+7] = min(led_blue, 255)
+    pkt[6] = get_control('small_rumble')
+    pkt[7] = get_control('big_rumble')
+    pkt[8] = get_control('r')
+    pkt[9] = get_control('g')
+    pkt[10] = get_control('b')
     # Time to flash bright (255 = 2.5 seconds)
-    pkt[offset+8] = 0 # min(flash_led1, 255)
+    pkt[11] = 0 # min(flash_led1, 255)
     # Time to flash dark (255 = 2.5 seconds)
-    pkt[offset+9] = 0 #min(flash_led2, 255)
-    #pkt[73] = 0x7C
-    #pkt[74] = 0x85
-    #pkt[75] = 0xAB
-    #pkt[76] = 0xC4
-    #if self.type == "bluetooth":
+    pkt[12] = 0 # min(flash_led2, 255)
+    pkt[21] = get_control('volume_l')
+    pkt[22] = get_control('volume_r')
+    pkt[23] = 0x49 # magic
+    pkt[24] = get_control('volume_speaker')
+    pkt[25] = 0x85 # magic
     t = bytearray([0xA2])+pkt
     pkt = pkt+struct.pack("<L", binascii.crc32(t))
     tfd.write(pkt)
-    #write_report(report_id, pkt)
 
 def get_bit(data, num, bit):
     return (data[num] & (1 << bit)) !=0
-
 
 def correct(v, min_, max_, dz):
     t = (max_ + min_) // 2
     c0 = t - dz
     c1 = t + dz
-    t = (max_ - min_ - 4 * dz) // 2 
+    t = (max_ - min_ - 4 * dz) // 2
     c2 = (1 << 29) // t
     r0 = (c2 * (v - c0)) >> 14
     r1 = (c2 * (v - c1)) >> 14
@@ -151,28 +157,15 @@ def parse(hid):
             pass
         if locals()[name]:
             x360_buttons = x360_buttons | mask
-    if left[0] != prev["x"] or left[1] != prev["y"] and reports % 100 == 1:
-        prev["x"] = left[0]
-        prev["y"] = left[1]
-        plt.figure(figsize=(100,100))
-        plt.subplot(211)
-        plt.scatter(((left[0]-128)/127)*32767, ((left[1]-128)/127)*32767)
-        plt.subplot(212)
-        plt.scatter(correct(left[0], 0, 255, 5), correct(left[1], 0, 255,5))
-        plt.pause(0.001)
     x360_axis = [correct(v, 0, 255, 5) for v in left+right]
-    #print(x360_axis)
     return x360_axis, x360_buttons, l2_analog, r2_analog
-    #print(x360_buttons)
-    #if left[0]<120:
-    #    x360_th_lx
-    #print(dpad_up, l2_analog, square, triangle, circle, cross, opt, share, left, right)
 
 def reader():
     global reports
     reports = reports + 1
     buf = bytearray(77)
     ret = tfd.readinto(buf)
+    print(buf)
     # change
     if ret < 77 or buf[0] != 0x11:
         print(ret)
@@ -183,18 +176,24 @@ def reader():
     for addr, transport in clients.items():
         transport.sendto(s, addr)
 
+
 def p():
     global reports
-    print(reports/5)
+    print("Latency", 5000/reports)
     reports = 0
     loop.call_later(5, p)
 
-#ply = plt()
-plt.ion()
+def writer():
+    print("qq")
+
+control()
+#control(0, 0, 0, 255, 0)
+#exit(0)
 loop = asyncio.get_event_loop()
 listen = loop.create_datagram_endpoint(
-    UDPProto, local_addr=('192.168.1.65', 9999))
+    UDPProto, local_addr=('127.0.0.1', 9999))
 loop.add_reader(report_fd, reader)
+#loop.add_writer(report_fd, writer)
 loop.call_later(5, p)
 transport, protocol = loop.run_until_complete(listen)
 try:

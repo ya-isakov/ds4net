@@ -1,0 +1,3 @@
+/server/rust/target
+/server/rust/Cargo.lock
+**/*.rs.bk
