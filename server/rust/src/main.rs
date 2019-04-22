@@ -6,24 +6,22 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 use std::thread;
 
-extern crate crossbeam_channel;
-use crossbeam_channel::{unbounded, Receiver, Sender};
-
-extern crate parking_lot;
-use parking_lot::RwLock;
-
-extern crate crc;
 use crc::crc32;
+use crossbeam_channel::{unbounded, Receiver, Sender};
+use parking_lot::RwLock;
 
 const DEFAULT_LATENCY: u8 = 4;
 
-fn handle_new_client(addr: SocketAddr, r: Receiver<[u8; 77]>) {
+type Packet = [u8; 77];
+type Clients = Arc<RwLock<HashMap<SocketAddr, Sender<Packet>>>>;
+
+fn send_to_client(addr: SocketAddr, r: &Receiver<Packet>, client: UdpSocket) {
     println!("addr: {}", addr);
-    let client = UdpSocket::bind("0.0.0.0:0").unwrap();
+    //let client = UdpSocket::bind("0.0.0.0:9999").unwrap();
     client.connect(addr).unwrap();
     let mut connected: bool = false;
     loop {
-        let packet: [u8; 77] = r.recv().unwrap();
+        let packet: Packet = r.recv().unwrap();
         match client.send(&packet) {
             Ok(_) => true,
             Err(ref err) if (err.kind() == std::io::ErrorKind::ConnectionRefused && connected) => {
@@ -50,7 +48,7 @@ fn transform_u32_to_array_of_u8(x: u32) -> [u8; 4] {
     let b1: u8 = ((x >> 16) & 0xff) as u8;
     let b2: u8 = ((x >> 8) & 0xff) as u8;
     let b3: u8 = (x & 0xff) as u8;
-    return [b3, b2, b1, b0];
+    [b3, b2, b1, b0]
 }
 
 fn fill_packet() -> [u8; 78] {
@@ -90,8 +88,8 @@ fn handle_rumble() {
     println!("{:?}", &pkt[..]);
 }
 
-fn handle_udp(clients: Arc<RwLock<HashMap<SocketAddr, Sender<[u8; 77]>>>>) {
-    let socket = UdpSocket::bind("127.0.0.1:9999").unwrap();
+fn handle_udp(clients: Clients) {
+    let socket = UdpSocket::bind("0.0.0.0:9999").unwrap();
     let mut buf: [u8; 4] = [0; 4];
     loop {
         let (amt, src) = socket.recv_from(&mut buf).unwrap();
@@ -100,7 +98,8 @@ fn handle_udp(clients: Arc<RwLock<HashMap<SocketAddr, Sender<[u8; 77]>>>>) {
             0 => {
                 let (s, r) = unbounded();
                 clients.write().insert(src, s);
-                let _handle = thread::spawn(move || handle_new_client(src, r));
+                let new_socket = socket.try_clone().unwrap();
+                let _handle = thread::spawn(move || send_to_client(src, &r, new_socket));
             }
             1 => handle_rumble(),
             _ => panic!("Bohuzel"),
@@ -110,19 +109,19 @@ fn handle_udp(clients: Arc<RwLock<HashMap<SocketAddr, Sender<[u8; 77]>>>>) {
 
 fn main() {
     handle_rumble();
-    let clients = Arc::new(RwLock::new(HashMap::new()));
-    let c_clients = Arc::clone(&clients);
+    let clients: Clients = Arc::new(RwLock::new(HashMap::new()));
+    let c_clients: Clients = Arc::clone(&clients);
     let _handle = thread::spawn(move || {
         handle_udp(c_clients);
     });
-    let mut f = File::open("/dev/hidraw2").unwrap();
+    let mut f = File::open("/dev/hidraw0").unwrap();
+    //let c_clients = Arc::clone(&clients);
     loop {
-        let c_clients = Arc::clone(&clients);
-        let mut packet = [0; 77];
+        let mut packet: Packet = [0; 77];
         let count = f.read(&mut packet).unwrap();
         assert_eq!(count, 77);
         assert_eq!(packet[0], 0x11);
-        for (_addr, s) in c_clients.read().iter() {
+        for (_addr, s) in clients.read().iter() {
             s.send(packet).unwrap()
         }
     }

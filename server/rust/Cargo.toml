@@ -2,6 +2,7 @@
 name = "ds4net-rust"
 version = "0.1.0"
 authors = ["Yaroslav Isakov <yaroslav.isakov@gmail.com>"]
+edition = "2018"
 
 [dependencies]
 crc = "1.8.1"
