@@ -121,8 +121,17 @@ fn main() {
         let count = f.read(&mut packet).unwrap();
         assert_eq!(count, 77);
         assert_eq!(packet[0], 0x11);
-        for (_addr, s) in clients.read().iter() {
-            s.send(packet).unwrap()
+        let mut gone_clients: Vec<SocketAddr> = Vec::new();
+        for (addr, s) in clients.read().iter() {
+            match s.send(packet) {
+                Ok(()) => (),
+                Err(_) => {
+                    gone_clients.push(*addr);
+                }
+            };
+        };
+        for client in gone_clients {
+            clients.write().remove(&client).unwrap();
         }
     }
     //handle.join().unwrap();
