@@ -1,28 +1,34 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
-use std::net::SocketAddr;
+use std::os::unix::io::FromRawFd;
+use std::net::{SocketAddr, Ipv4Addr, IpAddr};
 use std::net::UdpSocket;
 use std::sync::Arc;
 use std::thread;
+use std::io;
+use std::mem;
 
+use libc;
 use crc::crc32;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use parking_lot::RwLock;
 
 const DEFAULT_LATENCY: u8 = 4;
 
+const SO_ATTACH_REUSEPORT_CBPF: libc::c_int = 51;
+
 type Packet = [u8; 77];
 type Clients = Arc<RwLock<HashMap<SocketAddr, Sender<Packet>>>>;
 
-fn send_to_client(addr: SocketAddr, r: &Receiver<Packet>, client: UdpSocket) {
+fn send_to_client(addr: SocketAddr, r: &Receiver<Packet>, sock: UdpSocket) {
     println!("addr: {}", addr);
     //let client = UdpSocket::bind("0.0.0.0:9999").unwrap();
-    client.connect(addr).unwrap();
+    //client.connect(addr).unwrap();
     let mut connected: bool = false;
     loop {
         let packet: Packet = r.recv().unwrap();
-        match client.send(&packet) {
+        match sock.send(&packet) {
             Ok(_) => true,
             Err(ref err) if (err.kind() == std::io::ErrorKind::ConnectionRefused && connected) => {
                 println!("{} disconnected", addr);
@@ -88,8 +94,66 @@ fn handle_rumble() {
     println!("{:?}", &pkt[..]);
 }
 
+fn get_sockaddr(sa: &SocketAddr) -> (*const libc::sockaddr, libc::socklen_t) {
+    match *sa {
+            SocketAddr::V4(ref a) => {
+                (a as *const _ as *const _, mem::size_of_val(a) as libc::socklen_t)
+            }
+            SocketAddr::V6(ref a) => {
+                (a as *const _ as *const _, mem::size_of_val(a) as libc::socklen_t)
+            }
+    }
+}
+
+pub type __u8 = ::std::os::raw::c_uchar;
+pub type __u16 = ::std::os::raw::c_ushort;
+pub type __u32 = ::std::os::raw::c_uint;
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct sock_filter {
+    pub code: __u16,
+    pub jt: __u8,
+    pub jf: __u8,
+    pub k: __u32,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct sock_fprog {
+    pub len: ::std::os::raw::c_ushort,
+    pub filter: *mut sock_filter,
+}
+
+
+fn create_socket(addr: &SocketAddr, first: bool) -> UdpSocket {
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        let optval: libc::c_int = 1;
+        let ret = libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT, &optval as *const _ as *const libc::c_void, mem::size_of_val(&optval) as libc::socklen_t);
+        if ret != 0 {
+            panic!(io::Error::last_os_error());
+        }
+        if first {
+            //let prog = bpfprog!(1, 6 0 0 0);
+            let mut ops = Vec::with_capacity(1);
+            ops.push(sock_filter{code: 6, jt: 0, jf: 0, k: 0});
+            let prog = sock_fprog{len: 1, filter: ops.as_mut_ptr()};
+            println!("{:?}", *(prog.filter));
+            let ret = libc::setsockopt(fd, libc::SOL_SOCKET, SO_ATTACH_REUSEPORT_CBPF, &prog as *const _ as *const libc::c_void, mem::size_of_val(&prog) as libc::socklen_t);
+            if ret != 0 {
+                panic!(io::Error::last_os_error());
+            }
+        }
+        let (addrp, len) = get_sockaddr(addr);
+        //let (addrp, len) = addr.into_inner();
+        libc::bind(fd, addrp, len as _);
+        UdpSocket::from_raw_fd(fd)
+    }
+}
+
 fn handle_udp(clients: Clients) {
-    let socket = UdpSocket::bind("0.0.0.0:9999").unwrap();
+    //let socket = UdpSocket::bind("0.0.0.0:9999").unwrap();
+    let socket = create_socket(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 9999), false);
     let mut buf: [u8; 4] = [0; 4];
     loop {
         let (amt, src) = socket.recv_from(&mut buf).unwrap();
@@ -98,10 +162,12 @@ fn handle_udp(clients: Clients) {
             0 => {
                 let (s, r) = unbounded();
                 clients.write().insert(src, s);
-                let new_socket = socket.try_clone().unwrap();
-                let _handle = thread::spawn(move || send_to_client(src, &r, new_socket));
+                let client_socket = create_socket(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 9999), false);
+                client_socket.connect(src).unwrap();
+                thread::spawn(move || send_to_client(src, &r, client_socket));
             }
             1 => handle_rumble(),
+            2 => println!("got packet"),
             _ => panic!("Bohuzel"),
         };
     }
@@ -121,8 +187,18 @@ fn main() {
         let count = f.read(&mut packet).unwrap();
         assert_eq!(count, 77);
         assert_eq!(packet[0], 0x11);
-        for (_addr, s) in clients.read().iter() {
-            s.send(packet).unwrap()
+        //println!("{:?}", clients);
+        let mut gone_clients: Vec<SocketAddr> = Vec::new();
+        for (addr, s) in clients.read().iter() {
+            match s.send(packet) {
+                Ok(()) => (),
+                Err(_) => {
+                    gone_clients.push(*addr);
+                }
+            };
+        };
+        for client in gone_clients {
+            clients.write().remove(&client).unwrap();
         }
     }
     //handle.join().unwrap();
