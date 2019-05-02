@@ -17,27 +17,27 @@ type Clients = Arc<RwLock<HashMap<SocketAddr, Sender<Packet>>>>;
 
 fn send_to_client(addr: SocketAddr, r: &Receiver<Packet>, client: UdpSocket) {
     println!("addr: {}", addr);
-    //let client = UdpSocket::bind("0.0.0.0:9999").unwrap();
-    client.connect(addr).unwrap();
-    let mut connected: bool = false;
     loop {
         let packet: Packet = r.recv().unwrap();
-        match client.send(&packet) {
+        if packet[0] == 0xFE && packet[1] == 0xFE {
+            println!("Disconnected {}", addr);
+            break;
+        }
+        match client.send_to(&packet, addr) {
             Ok(_) => true,
-            Err(ref err) if (err.kind() == std::io::ErrorKind::ConnectionRefused && connected) => {
-                println!("{} disconnected", addr);
-                break;
-            }
             Err(err) => {
                 println!("Error on address {} {}", addr, err);
                 break;
             }
         };
-        connected = true;
     }
 }
 
-//fn handle_disconnect(addr: SocketAddr, _clients: &mut Vec<SocketAddr>) {}
+fn handle_disconnect(addr: SocketAddr, clients: &Clients) {
+    let disconnect_packet: Packet = [0xFE; 77];
+    let sender = clients.write().remove(&addr).unwrap();
+    sender.send(disconnect_packet).unwrap();
+}
 
 fn get_control(_val: &str) -> u8 {
     0
@@ -99,9 +99,14 @@ fn handle_udp(clients: Clients) {
                 let (s, r) = unbounded();
                 clients.write().insert(src, s);
                 let new_socket = socket.try_clone().unwrap();
-                let _handle = thread::spawn(move || send_to_client(src, &r, new_socket));
+                let thread_name = format!("{}", src);
+                thread::Builder::new()
+                    .name(thread_name)
+                    .spawn(move || send_to_client(src, &r, new_socket))
+                    .unwrap();
             }
             1 => handle_rumble(),
+            2 => handle_disconnect(src, &clients),
             _ => panic!("Bohuzel"),
         };
     }
@@ -111,9 +116,10 @@ fn main() {
     handle_rumble();
     let clients: Clients = Arc::new(RwLock::new(HashMap::new()));
     let c_clients: Clients = Arc::clone(&clients);
-    let _handle = thread::spawn(move || {
-        handle_udp(c_clients);
-    });
+    thread::Builder::new()
+        .name("handle_udp".to_string())
+        .spawn(move || handle_udp(c_clients))
+        .unwrap();
     let mut f = File::open("/dev/hidraw0").unwrap();
     //let c_clients = Arc::clone(&clients);
     loop {
@@ -121,17 +127,8 @@ fn main() {
         let count = f.read(&mut packet).unwrap();
         assert_eq!(count, 77);
         assert_eq!(packet[0], 0x11);
-        let mut gone_clients: Vec<SocketAddr> = Vec::new();
-        for (addr, s) in clients.read().iter() {
-            match s.send(packet) {
-                Ok(()) => (),
-                Err(_) => {
-                    gone_clients.push(*addr);
-                }
-            };
-        };
-        for client in gone_clients {
-            clients.write().remove(&client).unwrap();
+        for (_addr, s) in clients.read().iter() {
+            let _ = s.send(packet);
         }
     }
     //handle.join().unwrap();
