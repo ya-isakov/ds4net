@@ -158,7 +158,13 @@ fn init_vigem(socket: UdpSocket) -> Option<ViGEm> {
     vigem.register_x360_notification(move |large, small, led| {
         let command_buf: [u8; 4] = [1, large, small, 0];
         socket.send(&command_buf).unwrap();
-        println!("Got motor {}, {}, {}, {:?}", large, small, led, socket.read_timeout());
+        println!(
+            "Got motor {}, {}, {}, {:?}",
+            large,
+            small,
+            led,
+            socket.read_timeout()
+        );
     });
     Some(vigem)
 }
@@ -192,7 +198,7 @@ fn main() -> io::Result<()> {
                 if buf[0] != 0x77 {
                     handle_packet(&buf[2..], &mut vigem);
                 };
-            },
+            }
             Err(_e) => (), //println!("recv function failed: {:?}", e),
         }
     }
