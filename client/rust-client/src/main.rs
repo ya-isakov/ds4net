@@ -1,16 +1,20 @@
+use std::io;
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use ctrlc;
 
-mod vigem_api_gen;
-use vigem_api_gen::{DS4_BUTTONS, XUSB_BUTTON};
+use vigemclient_sys;
+use vigemclient_sys::{TargetType, ViGEm, XUsbReport, DS4_BUTTONS, XUSB_BUTTON};
 
 type Packet = [u8; 77];
 
 const DPADS: [u16; 9] = [0x1, 0x9, 0x8, 0xA, 0x2, 0x6, 0x4, 0x5, 0];
-const DEADZONE: i16 = 7;
+const DEADZONE: u8 = 7;
+const HIGH_DZ: u8 = (255 / 2) + DEADZONE;
+const LOW_DZ: u8 = (255 / 2) - DEADZONE;
 
 /*fn scale_axis(v: i32, min: i32, max: i32, dz: i32) -> i32 {
     let t1 = (max + min) / 2;
@@ -51,15 +55,9 @@ fn scale_axis(v: u8, neg: bool) -> i32 {
 }
 
 fn inside_deadzone(x: u8, y: u8) -> bool {
-    let fx = i16::from(x) - 128;
-    let fy = i16::from(y) - 128;
-    if (fx.pow(2) + fy.pow(2)) < DEADZONE.pow(2) {
+    if ((x < HIGH_DZ) && (x > LOW_DZ)) && ((y < HIGH_DZ) && (y > LOW_DZ)) {
         return true;
     }
-    //if ((fx < HIGH_DZ) && (fx > LOW_DZ)) &&
-    //   ((fy < HIGH_DZ) && (fy > LOW_DZ)) {
-    //    return true
-    //}
     false
 }
 
@@ -98,11 +96,7 @@ fn map_buttons(ds: u16) -> u16 {
     buttons
 }
 
-fn handle_packet(
-    packet: &[u8],
-    client: vigem_api_gen::PVIGEM_CLIENT,
-    target: vigem_api_gen::PVIGEM_TARGET,
-) {
+fn ds4_to_x360_packet_map(packet: &[u8]) -> XUsbReport {
     //let axis = packet[1..5].iter().map(|x| scale_axis(*x as i32, 0, 255, 5)).collect::<Vec<i32>>();
     let mut axis_lx = 0;
     let mut axis_ly = 0;
@@ -125,7 +119,7 @@ fn handle_packet(
     let mut ds_buttons: [u8; 2] = [0; 2];
     ds_buttons.copy_from_slice(&packet[5..7]);
     buttons |= map_buttons(u16::from_le_bytes(ds_buttons));
-    let report = vigem_api_gen::XUSB_REPORT {
+    XUsbReport {
         wButtons: buttons,
         bLeftTrigger: packet[8],
         bRightTrigger: packet[9],
@@ -133,12 +127,53 @@ fn handle_packet(
         sThumbLY: axis_ly as i16,
         sThumbRX: axis_rx as i16,
         sThumbRY: axis_ry as i16,
-    };
-    println!("report: {:?}", report);
-    unsafe { vigem_api_gen::vigem_target_x360_update(client, target, report) };
+    }
 }
 
-fn main() {
+#[cfg(not(target_os = "windows"))]
+fn handle_packet(packet: &[u8], vigem: &Option<ViGEm>) {
+    if vigem.is_none() {
+        let report = ds4_to_x360_packet_map(packet);
+        println!("report: {:?}", report);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn handle_packet(packet: &[u8], vigem: &mut Option<ViGEm>) {
+    if let Some(vigem) = vigem {
+        let report = ds4_to_x360_packet_map(packet);
+        vigem.target_x360_update(report);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn init_vigem() -> Option<ViGEm> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn init_vigem() -> Option<ViGEm> {
+    let mut vigem = ViGEm::new().unwrap();
+    vigem.add_target(TargetType::X360);
+    Some(vigem)
+}
+
+unsafe extern "C" fn handle_notification(
+        _client: vigemclient_sys::PVIGEM_CLIENT,
+        _target: vigemclient_sys::PVIGEM_TARGET,
+        large_motor: vigemclient_sys::UCHAR,
+        small_motor: vigemclient_sys::UCHAR,
+        _led_number: vigemclient_sys::UCHAR,
+        user_data: vigemclient_sys::PVOID,
+    ) {
+    let socket = &mut *(user_data as *mut UdpSocket);
+    let command_buf: [u8; 4] = [1, large_motor, small_motor, 0];
+    socket.send(&command_buf).unwrap();
+    println!("Got motor {}, {}, {:?}", large_motor, small_motor, socket.read_timeout());
+}
+
+
+fn main() -> io::Result<()> {
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
@@ -146,28 +181,39 @@ fn main() {
     })
     .expect("Error setting Ctrl-C handler");
 
-    let client = unsafe { vigem_api_gen::vigem_alloc() };
-    let res = unsafe { vigem_api_gen::vigem_connect(client) };
-    if res != vigem_api_gen::VIGEM_ERROR::VIGEM_ERROR_NONE {
-        panic!("Error connecting to client");
-    }
-    let target = unsafe { vigem_api_gen::vigem_target_x360_alloc() };
-    let _res = unsafe { vigem_api_gen::vigem_target_add(client, target) };
-
     let socket = UdpSocket::bind("0.0.0.0:0").expect("couldn't bind to address");
-    let mut command_buf: [u8; 4] = [0; 4];
+    socket.set_read_timeout(Some(Duration::from_millis(8)))?;
     socket
         .connect("192.168.1.2:9999")
         .expect("connect function failed");
-    socket.send(&command_buf).unwrap();
+    println!("local addr {:?}", socket.local_addr());
+    let mut command_buf: [u8; 4] = [0; 4];
+    socket.send(&command_buf)?;
+
+    let mut vigem = {
+        let mut socket = socket.try_clone()?;
+        match init_vigem() {
+            Some(v) => {
+                v.register_notification(Some(handle_notification), &mut socket as *mut _ as vigemclient_sys::PVOID);
+                Some(v)
+            },
+            None => None
+        }
+    };
+
     let mut buf: Packet = [0; 77];
     while running.load(Ordering::SeqCst) {
         match socket.recv(&mut buf) {
-            Ok(_received) => handle_packet(&buf[2..], client, target),
-            Err(e) => println!("recv function failed: {:?}", e),
+            Ok(_received) => {
+                if buf[0] != 0x77 {
+                    handle_packet(&buf[2..], &mut vigem);
+                };
+            },
+            Err(_e) => (), //println!("recv function failed: {:?}", e),
         }
     }
     println!("Stopped");
     command_buf[0] = 2;
-    socket.send(&command_buf).unwrap();
+    socket.send(&command_buf)?;
+    Ok(())
 }
