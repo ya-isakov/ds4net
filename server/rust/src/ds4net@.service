@@ -1,0 +1,9 @@
+[Unit]
+Description=ds4net
+
+[Service]
+ExecStart=/usr/bin/ds4net-rust
+User=nobody
+StandardInput=file:/dev/%i
+StandardOutput=file:/dev/%i
+StandardError=journal
