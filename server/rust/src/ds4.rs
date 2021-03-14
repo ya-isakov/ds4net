@@ -7,9 +7,9 @@ pub struct DS4Controls {
     pub large: u8,
     pub small: u8,
     latency: u8,
-    red: u8,
-    green: u8,
-    blue: u8,
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
     volume_l: u8,
     volume_r: u8,
     volume_speaker: u8,
@@ -48,7 +48,7 @@ impl Default for DS4Controls {
 }
 
 impl DS4Controls {
-    fn fill_packet(self: &Self) -> [u8; 78] {
+    fn fill_packet(self) -> [u8; 78] {
         let mut pkt = [0u8; 78];
         pkt[0] = 0x11;
         pkt[1] = 0xC0 | self.latency;
@@ -70,7 +70,7 @@ impl DS4Controls {
         pkt
     }
 
-    pub fn make_packet_with_checksum(self: &Self) -> [u8; 78] {
+    pub fn make_packet_with_checksum(self) -> [u8; 78] {
         let mut pkt = self.fill_packet();
         let crc = checksum(&pkt[0..74]);
         pkt[74..78].copy_from_slice(&crc);
