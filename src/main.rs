@@ -23,7 +23,7 @@ type Packet = [u8; 78];
 type Clients = Arc<RwLock<HashMap<SocketAddr, Sender<Packet>>>>;
 
 fn send_to_client(addr: SocketAddr, r: &Receiver<Packet>, client: UdpSocket) {
-    eprintln!("addr: {}", addr);
+    eprintln!("New client {}", addr);
     while let Ok(packet) = r.recv() {
         // TODO: change it to be 78 bytes, when client is ready
         match client.send_to(&packet[0..77], addr) {
@@ -42,7 +42,6 @@ fn handle_disconnect(addr: SocketAddr, clients: &Clients) {
 }
 
 fn control(ds4c: DS4Controls, writer: &mut impl Write) -> io::Result<()> {
-    eprintln!("{:p}", writer);
     let pkt = ds4c.make_packet_with_checksum();
     match writer.write(&pkt) {
         Ok(count) => assert_eq!(count, 78),
@@ -52,7 +51,6 @@ fn control(ds4c: DS4Controls, writer: &mut impl Write) -> io::Result<()> {
 }
 
 fn handle_rumble(large: u8, small: u8, writer: &mut impl Write, low_bat: &Arc<AtomicBool>) -> io::Result<()> {
-    eprintln!("Got rumble {} {}", large, small);
     let mut ds4c: DS4Controls = Default::default();
     if low_bat.load(Ordering::SeqCst) {
         ds4c.red = 255;
@@ -78,7 +76,6 @@ macro_rules! thread_check {
 }
 
 fn handle_udp(clients: Clients, stop: Arc<AtomicBool>, writer: &mut impl Write, low_bat: Arc<AtomicBool>) -> io::Result<()> {
-    eprintln!("{:p}", writer);
     let mut buf = [0u8; 4];
     let socket = thread_check!(UdpSocket::bind("0.0.0.0:9999"), stop);
     socket.set_read_timeout(Some(Duration::from_secs(1)))?;
@@ -93,7 +90,7 @@ fn handle_udp(clients: Clients, stop: Arc<AtomicBool>, writer: &mut impl Write, 
                 let (s, r) = unbounded();
                 clients.write().insert(src, s);
                 let new_socket = thread_check!(socket.try_clone(), stop);
-                let thread_name = format!("{}", src);
+                let thread_name = format!("send_to_client {}", src);
                 if let Err(err) = thread::Builder::new()
                     .name(thread_name)
                     .spawn(move || send_to_client(src, &r, new_socket))
