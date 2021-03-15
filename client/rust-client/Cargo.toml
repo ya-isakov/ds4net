@@ -1,8 +1,0 @@
-[package]
-name = "rust-client"
-version = "0.1.0"
-authors = ["Yaroslav Isakov <yaroslav.isakov@gmail.com>"]
-edition = "2018"
-
-[dependencies]
-ctrlc = "3.1"
