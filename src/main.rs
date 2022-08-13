@@ -14,12 +14,15 @@ use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use parking_lot::RwLock;
+use signal_hook::consts::signal::*;
 
 mod ds4;
 
 use ds4::DS4Controls;
 
-type Packet = [u8; 78];
+const PACKET_LEN: usize = 78;
+
+type Packet = [u8; PACKET_LEN];
 type Clients = Arc<RwLock<HashMap<SocketAddr, Sender<Packet>>>>;
 
 fn send_to_client(addr: SocketAddr, r: &Receiver<Packet>, client: UdpSocket) {
@@ -44,7 +47,7 @@ fn handle_disconnect(addr: SocketAddr, clients: &Clients) {
 fn control(ds4c: DS4Controls, writer: &mut impl Write) -> io::Result<()> {
     let pkt = ds4c.make_packet_with_checksum();
     match writer.write(&pkt) {
-        Ok(count) => assert_eq!(count, 78),
+        Ok(count) => assert_eq!(count, PACKET_LEN),
         Err(e) => return Err(e),
     };
     writer.flush()
@@ -77,7 +80,7 @@ macro_rules! thread_check {
 
 fn handle_udp(clients: Clients, stop: Arc<AtomicBool>, writer: &mut impl Write, low_bat: Arc<AtomicBool>) -> io::Result<()> {
     let mut buf = [0u8; 4];
-    let socket = thread_check!(UdpSocket::bind("0.0.0.0:9999"), stop);
+    let socket = thread_check!(UdpSocket::bind("[::]:9999"), stop);
     socket.set_read_timeout(Some(Duration::from_secs(1)))?;
     while !stop.load(Ordering::SeqCst) {
         let (amt, src) = match socket.recv_from(&mut buf) {
@@ -112,8 +115,10 @@ fn main() -> io::Result<()> {
     let clients: Clients = Arc::new(RwLock::new(HashMap::new()));
 
     let stop = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::SIGTERM, Arc::clone(&stop))?;
-    signal_hook::flag::register(signal_hook::SIGQUIT, Arc::clone(&stop))?;
+    signal_hook::flag::register_conditional_shutdown(SIGTERM, 1, Arc::clone(&stop))?;
+    signal_hook::flag::register_conditional_shutdown(SIGQUIT, 1, Arc::clone(&stop))?;
+    signal_hook::flag::register(SIGTERM, Arc::clone(&stop))?;
+    signal_hook::flag::register(SIGQUIT, Arc::clone(&stop))?;
 
     let low_bat = Arc::new(AtomicBool::new(false));
 
@@ -139,10 +144,10 @@ fn main() -> io::Result<()> {
     //let mut battery = 0;
 
     while !stop.load(Ordering::SeqCst) {
-        let mut packet: Packet = [0; 78];
+        let mut packet: Packet = [0; PACKET_LEN];
         match f_read.read(&mut packet) {
             Ok(count) => {
-                assert_eq!(count, 78);
+                assert_eq!(count, PACKET_LEN);
                 assert_eq!(packet[0], 0x11);
                 let battery_capacity = packet[32] & 0xF;
                 if battery_capacity == 0 {

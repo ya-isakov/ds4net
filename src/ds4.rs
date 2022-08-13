@@ -15,25 +15,17 @@ pub struct DS4Controls {
     volume_speaker: u8,
 }
 
-fn transform_u32_to_array_of_u8(x: u32) -> [u8; 4] {
-    let b0: u8 = ((x >> 24) & 0xff) as u8;
-    let b1: u8 = ((x >> 16) & 0xff) as u8;
-    let b2: u8 = ((x >> 8) & 0xff) as u8;
-    let b3: u8 = (x & 0xff) as u8;
-    [b3, b2, b1, b0]
-}
-
 fn checksum(packet: &[u8]) -> [u8; 4] {
     let mut full_packet = [0u8; 75];
     full_packet[0] = 0xA2;
     full_packet[1..].copy_from_slice(packet);
     let hasher = crc32::checksum_ieee(&full_packet);
-    transform_u32_to_array_of_u8(hasher.to_le())
+    hasher.to_le_bytes()
 }
 
 impl Default for DS4Controls {
     fn default() -> Self {
-        DS4Controls {
+        Self {
             large: 0,
             small: 0,
             latency: DEFAULT_LATENCY,
