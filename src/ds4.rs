@@ -1,4 +1,5 @@
-use crc::crc32;
+use crc::{Crc, CRC_32_ISO_HDLC};
+const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 const DEFAULT_LATENCY: u8 = 4;
 
@@ -15,11 +16,15 @@ pub struct DS4Controls {
     volume_speaker: u8,
 }
 
-fn checksum(packet: &[u8]) -> [u8; 4] {
+pub trait Controls {
+    fn make_packet_with_checksum(self) -> [u8; 78];
+}
+
+fn checksum_ds4(packet: &[u8]) -> [u8; 4] {
     let mut full_packet = [0u8; 75];
     full_packet[0] = 0xA2;
     full_packet[1..].copy_from_slice(packet);
-    let hasher = crc32::checksum_ieee(&full_packet);
+    let hasher = CRC.checksum(&full_packet);
     hasher.to_le_bytes()
 }
 
@@ -52,7 +57,7 @@ impl DS4Controls {
         pkt[10] = self.blue;
         // Time to flash bright (255 = 2.5 seconds)
         pkt[11] = 0; // min(flash_led1, 255)
-        // Time to flash dark (255 = 2.5 seconds)
+                     // Time to flash dark (255 = 2.5 seconds)
         pkt[12] = 0; // min(flash_led2, 255)
         pkt[21] = self.volume_l;
         pkt[22] = self.volume_r;
@@ -61,10 +66,12 @@ impl DS4Controls {
         pkt[25] = 0x85; //magic
         pkt
     }
+}
 
-    pub fn make_packet_with_checksum(self) -> [u8; 78] {
+impl Controls for DS4Controls {
+    fn make_packet_with_checksum(self) -> [u8; 78] {
         let mut pkt = self.fill_packet();
-        let crc = checksum(&pkt[0..74]);
+        let crc = checksum_ds4(&pkt[0..74]);
         pkt[74..78].copy_from_slice(&crc);
         pkt
     }
