@@ -1,9 +1,10 @@
 use std::fs::File;
 use std::io;
 
-pub const DS4_PACKET_LEN_USB: usize = 64;
+pub const PACKET_LEN_USB: usize = 64;
+pub const PACKET_LEN_BT: usize = 78;
 
-pub type DS4PacketInner = [u8; DS4_PACKET_LEN_USB];
+pub type DS4PacketInner = [u8; PACKET_LEN_USB];
 
 pub trait Packet {
     fn read(&mut self, f: &mut File) -> io::Result<()>;

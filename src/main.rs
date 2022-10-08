@@ -21,7 +21,7 @@ mod ds4;
 mod dsense;
 mod udevmon;
 
-use common::{DS4PacketInner, Packet, DS4_PACKET_LEN_USB};
+use common::{DS4PacketInner, Packet, PACKET_LEN_USB};
 use ds4::{Controls, DS4Controls, DS4PacketBT, DS4PacketUSB};
 use dsense::{DSensePacketBT, DSensePacketUSB};
 use udevmon::{DSType, Gamepads};
@@ -44,7 +44,7 @@ fn send_to_client(
             DSType::SenseUSB => Box::new(DSensePacketUSB::new()),
             DSType::SenseBT => Box::new(DSensePacketBT::new()),
         };
-        let mut new_packet: DS4PacketInner = [0; DS4_PACKET_LEN_USB];
+        let mut new_packet: DS4PacketInner = [0; PACKET_LEN_USB];
         match packet.read(&mut f_read) {
             Ok(()) => {
                 let battery_capacity = packet.battery_capacity();
@@ -93,7 +93,7 @@ where
 {
     let pkt = ctrl.make_packet_with_checksum();
     match writer.write(&pkt) {
-        Ok(count) => assert_eq!(count, DS4_PACKET_LEN_USB),
+        Ok(count) => assert_eq!(count, PACKET_LEN_USB),
         Err(e) => return Err(e),
     };
     writer.flush()

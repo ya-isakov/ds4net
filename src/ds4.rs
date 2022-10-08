@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io;
 use std::io::prelude::*;
 
-use crate::common::{DS4PacketInner, Packet, DS4_PACKET_LEN_USB};
+use crate::common::{DS4PacketInner, Packet, PACKET_LEN_BT, PACKET_LEN_USB};
 
 use crc::{Crc, CRC_32_ISO_HDLC};
 
@@ -83,10 +83,8 @@ impl Controls for DS4Controls {
     }
 }
 
-const DS4_PACKET_LEN_BT: usize = 77;
-
 pub struct DS4PacketBT {
-    inner: [u8; DS4_PACKET_LEN_BT],
+    inner: [u8; PACKET_LEN_BT],
 }
 pub struct DS4PacketUSB {
     inner: DS4PacketInner,
@@ -95,7 +93,7 @@ pub struct DS4PacketUSB {
 impl DS4PacketBT {
     pub fn new() -> DS4PacketBT {
         DS4PacketBT {
-            inner: [0; DS4_PACKET_LEN_BT],
+            inner: [0; PACKET_LEN_BT],
         }
     }
 }
@@ -111,8 +109,8 @@ impl Packet for DS4PacketBT {
         self.inner[54] & 0xF
     }
     fn to_ds4_packet(&self) -> DS4PacketInner {
-        let mut res: DS4PacketInner = [0; DS4_PACKET_LEN_USB];
-        res.copy_from_slice(&self.inner[0..DS4_PACKET_LEN_USB]);
+        let mut res: DS4PacketInner = [0; PACKET_LEN_USB];
+        res.copy_from_slice(&self.inner[0..PACKET_LEN_USB]);
         res
     }
     fn is_valid(&self) -> bool {
@@ -120,7 +118,7 @@ impl Packet for DS4PacketBT {
         true
     }
     fn get_size(&self) -> usize {
-        DS4_PACKET_LEN_BT
+        PACKET_LEN_BT
     }
     fn control(&self, writer: &mut File) -> io::Result<()> {
         //    let pkt = self.make_packet_with_checksum();
@@ -136,7 +134,7 @@ impl Packet for DS4PacketBT {
 impl DS4PacketUSB {
     pub fn new() -> DS4PacketUSB {
         DS4PacketUSB {
-            inner: [0; DS4_PACKET_LEN_USB],
+            inner: [0; PACKET_LEN_USB],
         }
     }
 }
@@ -158,7 +156,7 @@ impl Packet for DS4PacketUSB {
         self.inner[0] == 0x1
     }
     fn get_size(&self) -> usize {
-        DS4_PACKET_LEN_USB
+        PACKET_LEN_USB
     }
     fn control(&self, writer: &mut File) -> io::Result<()> {
         //    let pkt = self.make_packet_with_checksum();
