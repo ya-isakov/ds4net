@@ -16,198 +16,15 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use parking_lot::RwLock;
 use signal_hook::consts::signal::*;
 
+mod common;
 mod ds4;
+mod dsense;
 mod udevmon;
 
-use ds4::{Controls, DS4Controls};
-
-const DS4_PACKET_LEN_BT: usize = 77;
-const DS4_PACKET_LEN_USB: usize = 64;
-const DSENSE_PACKET_LEN_BT: usize = 78;
-const DSENSE_PACKET_LEN_USB: usize = 64;
-
-type DS4PacketInner = [u8; DS4_PACKET_LEN_USB];
-
-struct DS4PacketBT {
-    inner: [u8; DS4_PACKET_LEN_BT],
-}
-struct DS4PacketUSB {
-    inner: DS4PacketInner,
-}
-struct DSensePacketBT {
-    inner: [u8; DSENSE_PACKET_LEN_BT],
-}
-struct DSensePacketUSB {
-    inner: [u8; DSENSE_PACKET_LEN_USB],
-}
-
-trait Packet {
-    fn read(&mut self, f: &mut File) -> io::Result<()>;
-    fn battery_capacity(&self) -> u8;
-    fn to_ds4_packet(&self) -> DS4PacketInner;
-    fn is_valid(&self) -> bool;
-    fn get_size(&self) -> usize;
-    fn control(&self, writer: &mut File) -> io::Result<()>;
-}
-
-impl DS4PacketBT {
-    fn new() -> DS4PacketBT {
-        DS4PacketBT {
-            inner: [0; DS4_PACKET_LEN_BT],
-        }
-    }
-}
-impl Packet for DS4PacketBT {
-    fn read(&mut self, f: &mut File) -> io::Result<()> {
-        let count = f.read(&mut self.inner)?;
-        assert_eq!(count, self.get_size());
-        assert!(self.is_valid());
-        Ok(())
-    }
-    fn battery_capacity(&self) -> u8 {
-        self.inner[54] & 0xF
-    }
-    fn to_ds4_packet(&self) -> DS4PacketInner {
-        let mut res: DS4PacketInner = [0; DS4_PACKET_LEN_USB];
-        res.copy_from_slice(&self.inner[0..DS4_PACKET_LEN_USB]);
-        res
-    }
-    fn is_valid(&self) -> bool {
-        //self.inner[0] == 0x11
-        true
-    }
-    fn get_size(&self) -> usize {
-        DS4_PACKET_LEN_BT
-    }
-    fn control(&self, writer: &mut File) -> io::Result<()> {
-        //    let pkt = self.make_packet_with_checksum();
-        //    match writer.write(&pkt) {
-        //        Ok(count) => assert_eq!(count, self.get_size()),
-        //        Err(e) => return Err(e),
-        //    };
-        //    writer.flush()
-        Ok(())
-    }
-}
-
-impl DS4PacketUSB {
-    fn new() -> DS4PacketUSB {
-        DS4PacketUSB {
-            inner: [0; DS4_PACKET_LEN_USB],
-        }
-    }
-}
-impl Packet for DS4PacketUSB {
-    fn read(&mut self, f: &mut File) -> io::Result<()> {
-        let count = f.read(&mut self.inner)?;
-        assert_eq!(count, self.get_size());
-        assert!(self.is_valid());
-        Ok(())
-    }
-    fn battery_capacity(&self) -> u8 {
-        self.inner[54] & 0xF
-    }
-    fn to_ds4_packet(&self) -> DS4PacketInner {
-        self.inner
-    }
-    fn is_valid(&self) -> bool {
-        self.inner[0] == 0x1
-    }
-    fn get_size(&self) -> usize {
-        DS4_PACKET_LEN_USB
-    }
-    fn control(&self, writer: &mut File) -> io::Result<()> {
-        //    let pkt = self.make_packet_with_checksum();
-        //    match writer.write(&pkt) {
-        //        Ok(count) => assert_eq!(count, self.get_size()),
-        //        Err(e) => return Err(e),
-        //    };
-        //    writer.flush()
-        Ok(())
-    }
-}
-
-impl DSensePacketBT {
-    fn new() -> DSensePacketBT {
-        DSensePacketBT {
-            inner: [0; DSENSE_PACKET_LEN_BT],
-        }
-    }
-}
-
-impl Packet for DSensePacketBT {
-    fn read(&mut self, f: &mut File) -> io::Result<()> {
-        let count = f.read(&mut self.inner)?;
-        assert_eq!(count, self.get_size());
-        assert!(self.is_valid());
-        Ok(())
-    }
-    fn battery_capacity(&self) -> u8 {
-        100
-    }
-    fn to_ds4_packet(&self) -> DS4PacketInner {
-        let mut new_packet: DS4PacketInner = [0; DS4_PACKET_LEN_USB];
-        new_packet[1] = self.inner[2];
-        new_packet[2] = self.inner[3];
-        new_packet[3] = self.inner[4];
-        new_packet[4] = self.inner[5];
-        new_packet[5] = self.inner[9];
-        new_packet[6] = self.inner[10];
-        new_packet[8] = self.inner[6];
-        new_packet[9] = self.inner[7];
-        new_packet
-    }
-    fn is_valid(&self) -> bool {
-        self.inner[0] == 0x31
-    }
-    fn get_size(&self) -> usize {
-        DSENSE_PACKET_LEN_BT
-    }
-    fn control(&self, writer: &mut File) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl DSensePacketUSB {
-    fn new() -> DSensePacketUSB {
-        DSensePacketUSB {
-            inner: [0; DSENSE_PACKET_LEN_USB],
-        }
-    }
-}
-
-impl Packet for DSensePacketUSB {
-    fn read(&mut self, f: &mut File) -> io::Result<()> {
-        let count = f.read(&mut self.inner)?;
-        assert_eq!(count, self.get_size());
-        assert!(self.is_valid());
-        Ok(())
-    }
-    fn battery_capacity(&self) -> u8 {
-        100
-    }
-    fn to_ds4_packet(&self) -> DS4PacketInner {
-        let mut new_packet: DS4PacketInner = [0; DS4_PACKET_LEN_USB];
-        new_packet[1] = self.inner[1];
-        new_packet[2] = self.inner[2];
-        new_packet[3] = self.inner[3];
-        new_packet[4] = self.inner[4];
-        new_packet[5] = self.inner[8];
-        new_packet[6] = self.inner[9];
-        new_packet[8] = self.inner[5];
-        new_packet[9] = self.inner[6];
-        new_packet
-    }
-    fn is_valid(&self) -> bool {
-        self.inner[0] == 0x01
-    }
-    fn get_size(&self) -> usize {
-        DSENSE_PACKET_LEN_USB
-    }
-    fn control(&self, writer: &mut File) -> io::Result<()> {
-        Ok(())
-    }
-}
+use common::{DS4PacketInner, Packet, DS4_PACKET_LEN_USB};
+use ds4::{Controls, DS4Controls, DS4PacketBT, DS4PacketUSB};
+use dsense::{DSensePacketBT, DSensePacketUSB};
+use udevmon::{DSType, Gamepads};
 
 type Clients = HashMap<SocketAddr, Sender<DS4PacketUSB>>;
 
@@ -215,17 +32,17 @@ fn send_to_client(
     addr: SocketAddr,
     client: UdpSocket,
     hidraw_path: String,
-    gamepad_type: udevmon::DSType,
+    gamepad_type: DSType,
     global_stop: Arc<AtomicBool>,
 ) {
     eprintln!("Handling new client {} with gamepad {}", addr, hidraw_path);
     let mut f_read = File::open(&hidraw_path).unwrap();
     while !global_stop.load(Ordering::SeqCst) {
         let mut packet: Box<dyn Packet> = match gamepad_type {
-            udevmon::DSType::DS4BT => Box::new(DS4PacketBT::new()),
-            udevmon::DSType::DS4USB => Box::new(DS4PacketUSB::new()),
-            udevmon::DSType::SenseUSB => Box::new(DSensePacketUSB::new()),
-            udevmon::DSType::SenseBT => Box::new(DSensePacketBT::new()),
+            DSType::DS4BT => Box::new(DS4PacketBT::new()),
+            DSType::DS4USB => Box::new(DS4PacketUSB::new()),
+            DSType::SenseUSB => Box::new(DSensePacketUSB::new()),
+            DSType::SenseBT => Box::new(DSensePacketBT::new()),
         };
         let mut new_packet: DS4PacketInner = [0; DS4_PACKET_LEN_USB];
         match packet.read(&mut f_read) {
@@ -253,7 +70,7 @@ fn send_to_client(
     eprintln!("Thread stopped for {}", addr);
 }
 
-fn handle_disconnect(addr: SocketAddr, clients: &mut Clients, gamepads: &udevmon::Gamepads) {
+fn handle_disconnect(addr: SocketAddr, clients: &mut Clients, gamepads: &Gamepads) {
     let _ = clients.remove(&addr);
     match gamepads
         .write()
@@ -317,13 +134,13 @@ fn handle_new_client(
     sock_r: UdpSocket,
     sock_w: UdpSocket,
     clients: &mut Clients,
-    gamepads: &udevmon::Gamepads,
+    gamepads: &Gamepads,
     global_stop: Arc<AtomicBool>,
 ) {
     //let mut thread_name = format!("send_to_client {}", src);
     let mut selected_gamepad_path = String::from("");
     let mut selected_key = String::from("");
-    let mut gamepad_type: Option<udevmon::DSType> = None;
+    let mut gamepad_type: Option<DSType> = None;
     match gamepads
         .write()
         .iter_mut()
@@ -365,7 +182,7 @@ fn handle_udp(
     mut clients: Clients,
     global_stop: Arc<AtomicBool>,
     low_bat: Arc<AtomicBool>,
-    gamepads: udevmon::Gamepads,
+    gamepads: Gamepads,
 ) -> io::Result<()> {
     let mut buf = [0u8; 4];
     let socket = UdpSocket::bind("[::]:9999")?;
@@ -437,7 +254,7 @@ fn handle_udp(
 
 fn main() -> io::Result<()> {
     // synchronization stuff
-    let gamepads: udevmon::Gamepads = Arc::new(RwLock::new(HashMap::new()));
+    let gamepads: Gamepads = Arc::new(RwLock::new(HashMap::new()));
     let clients: Clients = HashMap::new(); //Arc::new(RwLock::new(HashMap::new()));
     udevmon::start_monitor(&gamepads);
 
