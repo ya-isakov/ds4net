@@ -97,6 +97,15 @@ fn filter_gamepads(device: udev::Device) -> Option<DSGamepad> {
 }
 
 pub fn start_monitor(gamepads: &Gamepads) {
+    let mut enumerator = udev::Enumerator::new().unwrap();
+    enumerator.match_subsystem("hidraw").unwrap();
+    for device in enumerator.scan_devices().unwrap() {
+	let sysname = String::from(device.sysname().to_str().unwrap());
+        if let Some(gamepad) = filter_gamepads(device) {
+            gamepads.write().insert(sysname, gamepad);
+            println!("Added {:?}", gamepads.read().keys());
+        }
+    }
     let gamepads = Arc::clone(gamepads);
     if let Err(err) = thread::Builder::new()
         .name(String::from("udev"))
