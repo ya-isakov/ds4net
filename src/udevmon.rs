@@ -1,11 +1,3 @@
-#[derive(Debug, Clone, Copy)]
-pub enum DSType {
-    DS4BT,
-    DS4USB,
-    SenseBT,
-    SenseUSB,
-}
-
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
@@ -17,6 +9,14 @@ use parking_lot::RwLock;
 
 const ID_DS4V2: &str = "000009CC";
 const ID_SENSE: &str = "00000CE6";
+
+#[derive(Debug, Clone, Copy)]
+pub enum DSType {
+    DS4BT,
+    DS4USB,
+    SenseBT,
+    SenseUSB,
+}
 
 pub type Gamepads = Arc<RwLock<HashMap<String, DSGamepad>>>;
 

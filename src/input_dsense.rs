@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io;
 use std::io::prelude::*;
 
-use crate::common::{DS4PacketInner, Packet, PACKET_LEN_BT, PACKET_LEN_USB};
+use crate::common_input::{DS4PacketInner, Packet, PACKET_LEN_BT, PACKET_LEN_USB};
 
 pub struct DSensePacketBT {
     inner: [u8; PACKET_LEN_BT],
@@ -27,7 +27,11 @@ impl Packet for DSensePacketBT {
         Ok(())
     }
     fn battery_capacity(&self) -> u8 {
-        100
+        match self.inner[54] >> 4 {
+            0x00 | 0x01 => (self.inner[54] & 0xF) * 10,
+            0x02 => 100,
+            _ => panic!("Bad status of charging"),
+        }
     }
     fn to_ds4_packet(&self) -> DS4PacketInner {
         let mut new_packet: DS4PacketInner = [0; PACKET_LEN_USB];
@@ -47,9 +51,6 @@ impl Packet for DSensePacketBT {
     fn get_size(&self) -> usize {
         PACKET_LEN_BT
     }
-    fn control(&self, writer: &mut File) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 impl DSensePacketUSB {
@@ -67,9 +68,15 @@ impl Packet for DSensePacketUSB {
         assert!(self.is_valid());
         Ok(())
     }
+
     fn battery_capacity(&self) -> u8 {
-        100
+        match self.inner[53] >> 4 {
+            0x00 | 0x01 => (self.inner[53] & 0xF) * 10,
+            0x02 => 100,
+            _ => panic!("Bad status of charging"),
+        }
     }
+
     fn to_ds4_packet(&self) -> DS4PacketInner {
         let mut new_packet: DS4PacketInner = [0; PACKET_LEN_USB];
         new_packet[1] = self.inner[1];
@@ -87,8 +94,5 @@ impl Packet for DSensePacketUSB {
     }
     fn get_size(&self) -> usize {
         PACKET_LEN_USB
-    }
-    fn control(&self, writer: &mut File) -> io::Result<()> {
-        Ok(())
     }
 }
