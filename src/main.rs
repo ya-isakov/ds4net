@@ -37,12 +37,13 @@ fn send_to_client(
     client: UdpSocket,
     mut f_read: File,
     gamepad_type: DSType,
+    client_stop: Arc<AtomicBool>,
     global_stop: Arc<AtomicBool>,
     battery_sender: Sender<ControlType>,
 ) {
     let mut battery_level = 0;
     //let mut f_read = File::open(&hidraw_path).unwrap();
-    while !global_stop.load(Ordering::SeqCst) {
+    while !client_stop.load(Ordering::SeqCst) && !global_stop.load(Ordering::SeqCst) {
         let mut packet: Box<dyn Packet> = match gamepad_type {
             DSType::DS4BT => Box::new(DS4PacketBT::new()),
             DSType::DS4USB => Box::new(DS4PacketUSB::new()),
@@ -58,7 +59,9 @@ fn send_to_client(
                         "Battery level changed for {} to {}%",
                         addr, battery_capacity
                     );
-                    battery_sender.send(ControlType::Battery(battery_capacity)).unwrap();
+                    battery_sender
+                        .send(ControlType::Battery(battery_capacity))
+                        .unwrap();
                     battery_level = battery_capacity;
                 }
                 new_packet = packet.to_ds4_packet();
@@ -78,23 +81,7 @@ fn send_to_client(
         };
     }
     eprintln!("Thread stopped for {}", addr);
-}
-
-fn handle_disconnect(addr: SocketAddr, clients: &mut Clients, gamepads: &Gamepads) {
-    let _ = clients.remove(&addr);
-    match gamepads
-        .write()
-        .iter_mut()
-        .find(|(_k, v)| v.used_by == Some(addr))
-    {
-        Some((_syspath, gamepad)) => gamepad.used_by = None,
-        None => (),
-    }
-    eprintln!(
-        "Client {} disconnected gracefully {:?}",
-        addr,
-        gamepads.read()
-    );
+    client_stop.store(true, Ordering::SeqCst);
 }
 
 pub enum ControlType {
@@ -107,10 +94,11 @@ fn control_ds4(
     mut f_write: File,
     r: Receiver<ControlType>,
     global_stop: Arc<AtomicBool>,
+    client_stop: Arc<AtomicBool>,
     is_bt: bool,
 ) {
     let mut ds4c: DS4Controls = Default::default();
-    while !global_stop.load(Ordering::SeqCst) {
+    while !global_stop.load(Ordering::SeqCst) && !client_stop.load(Ordering::SeqCst) {
         match r.recv().unwrap() {
             ControlType::Rumble { large, small } => {
                 ds4c.large = large;
@@ -137,10 +125,11 @@ fn control_sense_usb(
     mut f_write: File,
     r: Receiver<ControlType>,
     global_stop: Arc<AtomicBool>,
+    client_stop: Arc<AtomicBool>,
     is_bt: bool,
 ) {
     let mut sense: DSenseControls = Default::default();
-    while !global_stop.load(Ordering::SeqCst) {
+    while !global_stop.load(Ordering::SeqCst) && !client_stop.load(Ordering::SeqCst) {
         match r.recv().unwrap() {
             ControlType::Rumble { large, small } => {
                 sense.large = large;
@@ -168,59 +157,54 @@ fn control_gamepad(
     f_write: File,
     r: Receiver<ControlType>,
     global_stop: Arc<AtomicBool>,
+    client_stop: Arc<AtomicBool>,
 ) {
     match gamepad_type {
-        DSType::DS4USB => control_ds4(f_write, r, global_stop, false),
-        DSType::DS4BT => control_ds4(f_write, r, global_stop, true),
-        DSType::SenseUSB => control_sense_usb(f_write, r, global_stop, false),
-        DSType::SenseBT => control_sense_usb(f_write, r, global_stop, true),
+        DSType::DS4USB => control_ds4(f_write, r, global_stop, client_stop, false),
+        DSType::DS4BT => control_ds4(f_write, r, global_stop, client_stop, true),
+        DSType::SenseUSB => control_sense_usb(f_write, r, global_stop, client_stop, false),
+        DSType::SenseBT => control_sense_usb(f_write, r, global_stop, client_stop, true),
     }
 }
 
-fn handle_new_client(
-    src: SocketAddr,
-    sock_w: UdpSocket,
-    clients: &mut Clients,
-    gamepads: &Gamepads,
-    global_stop: Arc<AtomicBool>,
-) {
-    let (gamepad_type, gamepad_hidraw, f_read, f_write) = match gamepads
-        .write()
+fn find_gamepad(gamepads: &Gamepads, src: SocketAddr) -> Option<(DSType, String, File, File)> {
+    let mut locked_gamepads = gamepads.write();
+    let (_syspath, gamepad) = locked_gamepads
         .iter_mut()
-        .find(|(_k, v)| v.used_by.is_none())
-    {
-        Some((_syspath, gamepad)) => {
-            gamepad.used_by = Some(src);
-            let f_write = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&gamepad.hidraw_path)
-                .unwrap();
-            let f_read = f_write.try_clone().unwrap();
-            //syspath.to_string(),
-            (
-                gamepad.gamepad_type,
-                gamepad.hidraw_path.to_string(),
-                f_read,
-                f_write,
-            )
-        }
-        None => {
-            //eprintln!("No gamepads available");
-            return;
-        }
-    };
-    let (s, r) = unbounded();
-    clients.insert(src, s.clone());
-    eprintln!("New client connected {:?}", clients);
-    eprintln!("Gamepads after connect {:?}", gamepads);
-    let send_thread_name = format!("send_to_client {}", src);
-    let control_thread_name = format!("handle_control {}", gamepad_hidraw);
+        .find(|(_k, v)| v.used_by.is_none())?;
+    gamepad.used_by = Some(src);
+    let f_write = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&gamepad.hidraw_path)
+        .unwrap();
+    let f_read = f_write.try_clone().unwrap();
+    //syspath.to_string(),
+    Some((
+        gamepad.gamepad_type,
+        gamepad.hidraw_path.to_string(),
+        f_read,
+        f_write,
+    ))
+}
+
+fn create_input_thread(
+    src: SocketAddr,
+    gamepad_hidraw: String,
+    gamepad_type: DSType,
+    global_stop: &Arc<AtomicBool>,
+    client_stop: &Arc<AtomicBool>,
+    sock_w: UdpSocket,
+    f_read: File,
+    s: &Sender<ControlType>,
+) -> Option<()> {
     eprintln!(
         "Starting thread for handling new client {} with gamepad {}",
         src, gamepad_hidraw
     );
-    let stop_thread = Arc::clone(&global_stop);
+    let send_thread_name = format!("send_to_client {}", src);
+    let global_stop = Arc::clone(&global_stop);
+    let client_stop = Arc::clone(&client_stop);
     let battery_sender = s.clone();
     if let Err(err) = thread::Builder::new()
         .name(send_thread_name)
@@ -230,26 +214,86 @@ fn handle_new_client(
                 sock_w,
                 f_read,
                 gamepad_type,
-                stop_thread,
+                global_stop,
+                client_stop,
                 battery_sender,
             )
         })
     {
         eprintln!("Error in creating thread for client {}: {}", src, err);
-        //global_stop.store(true, Ordering::SeqCst);
-        return;
+        return None;
     }
-    let stop_thread = Arc::clone(&global_stop);
+    Some(())
+}
+
+fn create_control_thread(
+    src: SocketAddr,
+    gamepad_type: DSType,
+    global_stop: Arc<AtomicBool>,
+    client_stop: Arc<AtomicBool>,
+    f_write: File,
+    r: Receiver<ControlType>,
+) -> Option<()> {
+    eprintln!("Starting control thread for {}", src);
+    let control_thread_name = format!("handle_control {}", src);
+    let global_stop_thread = Arc::clone(&global_stop);
+    let client_stop_thread = Arc::clone(&client_stop);
     if let Err(err) = thread::Builder::new()
         .name(control_thread_name)
-        .spawn(move || control_gamepad(gamepad_type, f_write, r, stop_thread))
+        .spawn(move || {
+            control_gamepad(
+                gamepad_type,
+                f_write,
+                r,
+                global_stop_thread,
+                client_stop_thread,
+            )
+        })
     {
         eprintln!(
             "Error in creating control thread for client {}: {}",
             src, err
         );
+        client_stop.store(true, Ordering::SeqCst);
+        return None;
+    }
+    Some(())
+}
+
+fn handle_new_client(
+    src: SocketAddr,
+    sock_w: UdpSocket,
+    clients: &mut Clients,
+    gamepads: &Gamepads,
+    global_stop: Arc<AtomicBool>,
+) {
+    let (gamepad_type, gamepad_hidraw, f_read, f_write) = match find_gamepad(&gamepads, src) {
+        Some((gamepad_type, gamepad_hidraw, f_read, f_write)) => {
+            (gamepad_type, gamepad_hidraw, f_read, f_write)
+        }
+        None => return,
+    };
+    eprintln!("New client connected {:?}", clients);
+    eprintln!("Gamepads after connect {:?}", gamepads);
+    let client_stop = Arc::new(AtomicBool::new(false));
+    let (s, r) = unbounded();
+    if create_input_thread(
+        src,
+        gamepad_hidraw,
+        gamepad_type,
+        &global_stop,
+        &client_stop,
+        sock_w,
+        f_read,
+        &s,
+    )
+    .is_none()
+    {
         return;
     }
+    if create_control_thread(src, gamepad_type, global_stop, client_stop, f_write, r).is_none() {
+        return;
+    };
     s.send(ControlType::Rumble {
         large: 0,
         small: 255,
@@ -258,6 +302,36 @@ fn handle_new_client(
     thread::sleep(Duration::from_secs(1));
     s.send(ControlType::Color { r: 0, g: 0, b: 255 }).unwrap();
     s.send(ControlType::Rumble { large: 0, small: 0 }).unwrap();
+    clients.insert(src, s.clone());
+}
+
+fn handle_rumble(clients: &Clients, src: SocketAddr, large: u8, small: u8) {
+    clients.get(&src).and_then(|sender| {
+        sender
+            .send(ControlType::Rumble {
+                large: large,
+                small: small,
+            })
+            .unwrap();
+        Some(())
+    });
+}
+
+fn handle_disconnect(addr: SocketAddr, clients: &mut Clients, gamepads: &Gamepads) {
+    let _ = clients.remove(&addr);
+    match gamepads
+        .write()
+        .iter_mut()
+        .find(|(_k, v)| v.used_by == Some(addr))
+    {
+        Some((_syspath, gamepad)) => gamepad.used_by = None,
+        None => (),
+    }
+    eprintln!(
+        "Client {} disconnected gracefully {:?}",
+        addr,
+        gamepads.read()
+    );
 }
 
 fn handle_udp(
@@ -281,12 +355,7 @@ fn handle_udp(
                 let global_stop = Arc::clone(&global_stop);
                 handle_new_client(src, sock_w, &mut clients, &gamepads, global_stop);
             }
-            1 => clients[&src]
-                .send(ControlType::Rumble {
-                    large: buf[1],
-                    small: buf[2],
-                })
-                .unwrap(),
+            1 => handle_rumble(&clients, src, buf[1], buf[2]),
             2 => handle_disconnect(src, &mut clients, &gamepads),
             _ => panic!("Bohuzel"),
         };
@@ -297,13 +366,13 @@ fn handle_udp(
 fn main() -> io::Result<()> {
     let gamepads: Gamepads = Arc::new(RwLock::new(HashMap::new()));
     let clients: Clients = HashMap::new();
-    udevmon::start_monitor(&gamepads);
-
     let stop = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register_conditional_shutdown(SIGTERM, 1, Arc::clone(&stop))?;
     signal_hook::flag::register_conditional_shutdown(SIGQUIT, 1, Arc::clone(&stop))?;
     signal_hook::flag::register(SIGTERM, Arc::clone(&stop))?;
     signal_hook::flag::register(SIGQUIT, Arc::clone(&stop))?;
+
+    udevmon::start_monitor(&gamepads, Arc::clone(&stop));
 
     //let mut f_read = unsafe { File::from_raw_fd(0) };
     //let mut f_read = File::open("/dev/hidraw0")?;

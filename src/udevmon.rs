@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 
 use mio::{Events, Interest, Poll, Token};
@@ -40,7 +43,7 @@ fn handle_event(event: udev::Event, gamepads: &Gamepads) {
     }
 }
 
-fn poll(gamepads: Gamepads) -> io::Result<()> {
+fn poll(gamepads: Gamepads, global_stop: Arc<AtomicBool>) -> io::Result<()> {
     let builder = udev::MonitorBuilder::new()
         .unwrap()
         .match_subsystem("hidraw")
@@ -55,7 +58,7 @@ fn poll(gamepads: Gamepads) -> io::Result<()> {
         Interest::READABLE | Interest::WRITABLE,
     )?;
 
-    loop {
+    while !global_stop.load(Ordering::SeqCst) {
         poll.poll(&mut events, None)?;
         for event in &events {
             if event.token() == Token(0) && event.is_writable() {
@@ -64,6 +67,7 @@ fn poll(gamepads: Gamepads) -> io::Result<()> {
             }
         }
     }
+    Ok(())
 }
 
 fn filter_gamepads(device: udev::Device) -> Option<DSGamepad> {
@@ -96,11 +100,11 @@ fn filter_gamepads(device: udev::Device) -> Option<DSGamepad> {
     })
 }
 
-pub fn start_monitor(gamepads: &Gamepads) {
+pub fn start_monitor(gamepads: &Gamepads, global_stop: Arc<AtomicBool>) {
     let mut enumerator = udev::Enumerator::new().unwrap();
     enumerator.match_subsystem("hidraw").unwrap();
     for device in enumerator.scan_devices().unwrap() {
-	let sysname = String::from(device.sysname().to_str().unwrap());
+        let sysname = String::from(device.sysname().to_str().unwrap());
         if let Some(gamepad) = filter_gamepads(device) {
             gamepads.write().insert(sysname, gamepad);
             println!("Added {:?}", gamepads.read().keys());
@@ -109,7 +113,7 @@ pub fn start_monitor(gamepads: &Gamepads) {
     let gamepads = Arc::clone(gamepads);
     if let Err(err) = thread::Builder::new()
         .name(String::from("udev"))
-        .spawn(move || poll(gamepads))
+        .spawn(move || poll(gamepads, global_stop))
     {
         eprintln!("Error in creating thread for monitoring udev: {}", err);
         //stop.store(true, Ordering::SeqCst);

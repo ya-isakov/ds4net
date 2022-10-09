@@ -27,16 +27,15 @@ impl Packet for DS4PacketBT {
         Ok(())
     }
     fn battery_capacity(&self) -> u8 {
-        (self.inner[54] & 0xF) * 10
+        (self.inner[32] & 0xF) * 10
     }
     fn to_ds4_packet(&self) -> DS4PacketInner {
         let mut res: DS4PacketInner = [0; PACKET_LEN_USB];
-        res.copy_from_slice(&self.inner[0..PACKET_LEN_USB]);
+        res.copy_from_slice(&self.inner[2..PACKET_LEN_USB + 2]);
         res
     }
     fn is_valid(&self) -> bool {
-        //self.inner[0] == 0x11
-        true
+        self.inner[0] == 0x11
     }
     fn get_size(&self) -> usize {
         PACKET_LEN_BT
@@ -59,7 +58,7 @@ impl Packet for DS4PacketUSB {
         Ok(())
     }
     fn battery_capacity(&self) -> u8 {
-        (self.inner[54] & 0xF) * 10
+        (self.inner[30] & 0xF) * 10
     }
     fn to_ds4_packet(&self) -> DS4PacketInner {
         self.inner
