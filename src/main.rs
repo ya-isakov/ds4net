@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::io::prelude::*;
 use std::net::SocketAddr;
 use std::net::UdpSocket;
-use std::os::unix::io::FromRawFd;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -60,12 +58,12 @@ fn send_to_client(
                         "Battery level changed for {} to {}%",
                         addr, battery_capacity
                     );
-                    battery_sender.send(ControlType::Battery(battery_capacity));
+                    battery_sender.send(ControlType::Battery(battery_capacity)).unwrap();
                     battery_level = battery_capacity;
                 }
                 new_packet = packet.to_ds4_packet();
             }
-            Err(err) => {
+            Err(_err) => {
                 //eprintln!("Error while reading from gamepad src={} err={}", addr, err);
                 new_packet[0] = 0x77;
                 break;
@@ -87,9 +85,9 @@ fn handle_disconnect(addr: SocketAddr, clients: &mut Clients, gamepads: &Gamepad
     match gamepads
         .write()
         .iter_mut()
-        .find(|(k, v)| v.used_by == Some(addr))
+        .find(|(_k, v)| v.used_by == Some(addr))
     {
-        Some((syspath, gamepad)) => gamepad.used_by = None,
+        Some((_syspath, gamepad)) => gamepad.used_by = None,
         None => (),
     }
     eprintln!(
@@ -97,19 +95,6 @@ fn handle_disconnect(addr: SocketAddr, clients: &mut Clients, gamepads: &Gamepad
         addr,
         gamepads.read()
     );
-}
-
-// Signal that udp thread is stopped because of error
-macro_rules! thread_check {
-    ( $x:expr, $r:expr ) => {
-        match $x {
-            Ok(var) => var,
-            Err(err) => {
-                $r.store(true, Ordering::SeqCst);
-                return Err(err);
-            }
-        }
-    };
 }
 
 pub enum ControlType {
@@ -180,7 +165,7 @@ fn control_sense_usb(
 
 fn control_gamepad(
     gamepad_type: DSType,
-    mut f_write: File,
+    f_write: File,
     r: Receiver<ControlType>,
     global_stop: Arc<AtomicBool>,
 ) {
@@ -194,25 +179,24 @@ fn control_gamepad(
 
 fn handle_new_client(
     src: SocketAddr,
-    sock_r: UdpSocket,
     sock_w: UdpSocket,
     clients: &mut Clients,
     gamepads: &Gamepads,
     global_stop: Arc<AtomicBool>,
 ) {
-    let (gamepad_type, gamepad_hidraw, f_read, mut f_write) = match gamepads
+    let (gamepad_type, gamepad_hidraw, f_read, f_write) = match gamepads
         .write()
         .iter_mut()
-        .find(|(k, v)| v.used_by.is_none())
+        .find(|(_k, v)| v.used_by.is_none())
     {
         Some((_syspath, gamepad)) => {
             gamepad.used_by = Some(src);
-            let mut f_write = OpenOptions::new()
+            let f_write = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(&gamepad.hidraw_path)
                 .unwrap();
-            let mut f_read = f_write.try_clone().unwrap();
+            let f_read = f_write.try_clone().unwrap();
             //syspath.to_string(),
             (
                 gamepad.gamepad_type,
@@ -279,7 +263,6 @@ fn handle_new_client(
 fn handle_udp(
     mut clients: Clients,
     global_stop: Arc<AtomicBool>,
-    low_bat: Arc<AtomicBool>,
     gamepads: Gamepads,
 ) -> io::Result<()> {
     let mut buf = [0u8; 4];
@@ -294,10 +277,9 @@ fn handle_udp(
         let buf = &mut buf[..amt];
         match buf[0] {
             0 => {
-                let sock_r = socket.try_clone()?;
                 let sock_w = socket.try_clone()?;
                 let global_stop = Arc::clone(&global_stop);
-                handle_new_client(src, sock_r, sock_w, &mut clients, &gamepads, global_stop);
+                handle_new_client(src, sock_w, &mut clients, &gamepads, global_stop);
             }
             1 => clients[&src]
                 .send(ControlType::Rumble {
@@ -323,8 +305,6 @@ fn main() -> io::Result<()> {
     signal_hook::flag::register(SIGTERM, Arc::clone(&stop))?;
     signal_hook::flag::register(SIGQUIT, Arc::clone(&stop))?;
 
-    let low_bat = Arc::new(AtomicBool::new(false));
-
     //let mut f_read = unsafe { File::from_raw_fd(0) };
     //let mut f_read = File::open("/dev/hidraw0")?;
     //let mut stdin = io::stdin();
@@ -333,6 +313,6 @@ fn main() -> io::Result<()> {
     // using stdout or stderr
     // Could use a io::Stdin here, but it's line buffered
     //let mut f_write = unsafe { File::from_raw_fd(1) };
-    handle_udp(clients, stop, low_bat, gamepads)?;
+    handle_udp(clients, stop, gamepads)?;
     Ok(())
 }

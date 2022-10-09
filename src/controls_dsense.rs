@@ -6,7 +6,6 @@ use crc::{Crc, CRC_32_ISO_HDLC};
 
 use crate::common_output::Controls;
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
-const DEFAULT_LATENCY: u8 = 4;
 
 #[derive(Debug)]
 pub struct DSenseControls {
@@ -100,7 +99,7 @@ impl Controls for DSenseControls {
         pkt[0] = 0x31;
         pkt[1] = self.seq << 4;
         pkt[2] = 0x10;
-        self.seq = self.seq + 1;
+        self.seq += 1;
         if self.seq == 16 {
             self.seq = 0;
         }

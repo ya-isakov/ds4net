@@ -102,7 +102,7 @@ pub fn start_monitor(gamepads: &Gamepads) {
         .name(String::from("udev"))
         .spawn(move || poll(gamepads))
     {
-        eprintln!("Error in creating thread for monitoring udev");
+        eprintln!("Error in creating thread for monitoring udev: {}", err);
         //stop.store(true, Ordering::SeqCst);
     }
 }
