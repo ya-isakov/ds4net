@@ -11,9 +11,9 @@ pub struct DSensePacketUSB {
     inner: [u8; PACKET_LEN_USB],
 }
 
-impl DSensePacketBT {
-    pub fn new() -> DSensePacketBT {
-        DSensePacketBT {
+impl Default for DSensePacketBT {
+    fn default() -> Self {
+        Self {
             inner: [0; PACKET_LEN_BT],
         }
     }
@@ -53,9 +53,9 @@ impl Packet for DSensePacketBT {
     }
 }
 
-impl DSensePacketUSB {
-    pub fn new() -> DSensePacketUSB {
-        DSensePacketUSB {
+impl Default for DSensePacketUSB {
+    fn default() -> Self {
+        Self {
             inner: [0; PACKET_LEN_USB],
         }
     }

@@ -11,9 +11,9 @@ pub struct DS4PacketUSB {
     inner: DS4PacketInner,
 }
 
-impl DS4PacketBT {
-    pub fn new() -> DS4PacketBT {
-        DS4PacketBT {
+impl Default for DS4PacketBT {
+    fn default() -> Self {
+        Self {
             inner: [0; PACKET_LEN_BT],
         }
     }
@@ -42,9 +42,9 @@ impl Packet for DS4PacketBT {
     }
 }
 
-impl DS4PacketUSB {
-    pub fn new() -> DS4PacketUSB {
-        DS4PacketUSB {
+impl Default for DS4PacketUSB {
+    fn default() -> Self {
+        Self {
             inner: [0; PACKET_LEN_USB],
         }
     }

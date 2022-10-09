@@ -2,32 +2,21 @@ use std::fs::File;
 use std::io;
 use std::io::Write;
 
-use crc::{Crc, CRC_32_ISO_HDLC};
-
-use crate::common_output::Controls;
-const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+use crate::common_output::{calculate_checksum_bt, Controls};
 const DEFAULT_LATENCY: u8 = 4;
 
 #[derive(Debug)]
 pub struct DS4Controls {
-    pub large: u8,
-    pub small: u8,
+    large: u8,
+    small: u8,
     latency: u8,
-    pub red: u8,
-    pub green: u8,
-    pub blue: u8,
+    red: u8,
+    green: u8,
+    blue: u8,
     volume_l: u8,
     volume_r: u8,
     volume_speaker: u8,
-    pub battery: u8,
-}
-
-fn checksum_ds4(packet: &[u8]) -> [u8; 4] {
-    let mut full_packet = [0u8; 75];
-    full_packet[0] = 0xA2;
-    full_packet[1..].copy_from_slice(packet);
-    let hasher = CRC.checksum(&full_packet);
-    hasher.to_le_bytes()
+    battery: u8,
 }
 
 impl Default for DS4Controls {
@@ -81,6 +70,18 @@ impl DS4Controls {
 }
 
 impl Controls for DS4Controls {
+    fn set_color(&mut self, r: u8, g: u8, b: u8) {
+        self.red = r;
+        self.green = g;
+        self.blue = b;
+    }
+    fn set_rumble(&mut self, large: u8, small: u8) {
+        self.large = large;
+        self.small = small;
+    }
+    fn set_battery(&mut self, level: u8) {
+        self.battery = level;
+    }
     fn write_packet_usb(&self, f_write: &mut File) -> io::Result<()> {
         let mut pkt = [0; 32];
         pkt[4..11].copy_from_slice(&self.fill_packet());
@@ -102,7 +103,7 @@ impl Controls for DS4Controls {
         pkt[23] = 0x49; // magic
         pkt[24] = self.volume_speaker;
         pkt[25] = 0x85; //magic
-        let crc = checksum_ds4(&pkt[0..74]);
+        let crc = calculate_checksum_bt(&pkt[0..74]);
         pkt[74..78].copy_from_slice(&crc);
         let count = f_write.write(&pkt)?;
         assert_eq!(count, 78);

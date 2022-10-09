@@ -10,7 +10,7 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 use parking_lot::RwLock;
 use signal_hook::consts::signal::*;
 
@@ -31,38 +31,36 @@ use input_dsense::{DSensePacketBT, DSensePacketUSB};
 use udevmon::{DSType, Gamepads};
 
 type Clients = HashMap<SocketAddr, Sender<ControlType>>;
+type SendFunc =
+    fn(SocketAddr, UdpSocket, File, Arc<AtomicBool>, Arc<AtomicBool>, Sender<ControlType>);
+type ControlFunc = fn(File, Receiver<ControlType>, Arc<AtomicBool>, Arc<AtomicBool>, bool);
 
-fn send_to_client(
+pub enum ControlType {
+    Rumble { large: u8, small: u8 },
+    Color { r: u8, g: u8, b: u8 },
+    Battery(u8),
+}
+
+fn send_to_client<T: Packet + Default>(
     addr: SocketAddr,
     client: UdpSocket,
     mut f_read: File,
-    gamepad_type: DSType,
-    client_stop: Arc<AtomicBool>,
     global_stop: Arc<AtomicBool>,
-    battery_sender: Sender<ControlType>,
+    client_stop: Arc<AtomicBool>,
+    sender: Sender<ControlType>,
 ) {
-    let mut battery_level = 0;
+    let mut bat_level = 0;
     //let mut f_read = File::open(&hidraw_path).unwrap();
     while !client_stop.load(Ordering::SeqCst) && !global_stop.load(Ordering::SeqCst) {
-        let mut packet: Box<dyn Packet> = match gamepad_type {
-            DSType::DS4BT => Box::new(DS4PacketBT::new()),
-            DSType::DS4USB => Box::new(DS4PacketUSB::new()),
-            DSType::SenseUSB => Box::new(DSensePacketUSB::new()),
-            DSType::SenseBT => Box::new(DSensePacketBT::new()),
-        };
+        let mut packet: T = Default::default();
         let mut new_packet: DS4PacketInner = [0; PACKET_LEN_USB];
         match packet.read(&mut f_read) {
             Ok(()) => {
-                let battery_capacity = packet.battery_capacity();
-                if battery_capacity != battery_level {
-                    eprintln!(
-                        "Battery level changed for {} to {}%",
-                        addr, battery_capacity
-                    );
-                    battery_sender
-                        .send(ControlType::Battery(battery_capacity))
-                        .unwrap();
-                    battery_level = battery_capacity;
+                let capacity = packet.battery_capacity();
+                if capacity != bat_level {
+                    eprintln!("Battery level changed for {} to {}%", addr, capacity);
+                    sender.send(ControlType::Battery(capacity)).unwrap();
+                    bat_level = capacity;
                 }
                 new_packet = packet.to_ds4_packet();
             }
@@ -72,99 +70,51 @@ fn send_to_client(
                 break;
             }
         }
-        match client.send_to(&new_packet, addr) {
-            Ok(_) => true,
-            Err(err) => {
-                eprintln!("Error on address src={} err={}", addr, err);
-                break;
-            }
+        if let Err(err) = client.send_to(&new_packet, addr) {
+            eprintln!("Error on address src={} err={}", addr, err);
+            break;
         };
     }
-    eprintln!("Thread stopped for {}", addr);
+    eprintln!("Input thread stopped for {}", addr);
     client_stop.store(true, Ordering::SeqCst);
 }
 
-pub enum ControlType {
-    Rumble { large: u8, small: u8 },
-    Color { r: u8, g: u8, b: u8 },
-    Battery(u8),
-}
-
-fn control_ds4(
+fn control_dsc<T: Controls + Default>(
     mut f_write: File,
     r: Receiver<ControlType>,
     global_stop: Arc<AtomicBool>,
     client_stop: Arc<AtomicBool>,
     is_bt: bool,
 ) {
-    let mut ds4c: DS4Controls = Default::default();
+    let mut dsc: T = Default::default();
     while !global_stop.load(Ordering::SeqCst) && !client_stop.load(Ordering::SeqCst) {
-        match r.recv().unwrap() {
-            ControlType::Rumble { large, small } => {
-                ds4c.large = large;
-                ds4c.small = small;
+        match r.recv_timeout(Duration::from_millis(100)) {
+            Ok(result) => {
+                match result {
+                    ControlType::Rumble { large, small } => {
+                        dsc.set_rumble(large, small);
+                    }
+                    ControlType::Color { r, g, b } => {
+                        dsc.set_color(r, g, b);
+                    }
+                    ControlType::Battery(level) => {
+                        dsc.set_battery(level);
+                    }
+                }
+                if is_bt {
+                    dsc.write_packet_bt(&mut f_write).unwrap()
+                } else {
+                    dsc.write_packet_usb(&mut f_write).unwrap()
+                }
             }
-            ControlType::Color { r, g, b } => {
-                ds4c.red = r;
-                ds4c.green = g;
-                ds4c.blue = b;
+            Err(RecvTimeoutError::Timeout) => (),
+            Err(RecvTimeoutError::Disconnected) => {
+                client_stop.store(true, Ordering::SeqCst);
+                break;
             }
-            ControlType::Battery(level) => {
-                ds4c.battery = level;
-            }
-        }
-        if is_bt {
-            ds4c.write_packet_bt(&mut f_write).unwrap()
-        } else {
-            ds4c.write_packet_usb(&mut f_write).unwrap()
         }
     }
-}
-
-fn control_sense_usb(
-    mut f_write: File,
-    r: Receiver<ControlType>,
-    global_stop: Arc<AtomicBool>,
-    client_stop: Arc<AtomicBool>,
-    is_bt: bool,
-) {
-    let mut sense: DSenseControls = Default::default();
-    while !global_stop.load(Ordering::SeqCst) && !client_stop.load(Ordering::SeqCst) {
-        match r.recv().unwrap() {
-            ControlType::Rumble { large, small } => {
-                sense.large = large;
-                sense.small = small;
-            }
-            ControlType::Color { r, g, b } => {
-                sense.red = r;
-                sense.green = g;
-                sense.blue = b;
-            }
-            ControlType::Battery(level) => {
-                sense.battery = level;
-            }
-        }
-        if is_bt {
-            sense.write_packet_bt(&mut f_write).unwrap()
-        } else {
-            sense.write_packet_usb(&mut f_write).unwrap()
-        }
-    }
-}
-
-fn control_gamepad(
-    gamepad_type: DSType,
-    f_write: File,
-    r: Receiver<ControlType>,
-    global_stop: Arc<AtomicBool>,
-    client_stop: Arc<AtomicBool>,
-) {
-    match gamepad_type {
-        DSType::DS4USB => control_ds4(f_write, r, global_stop, client_stop, false),
-        DSType::DS4BT => control_ds4(f_write, r, global_stop, client_stop, true),
-        DSType::SenseUSB => control_sense_usb(f_write, r, global_stop, client_stop, false),
-        DSType::SenseBT => control_sense_usb(f_write, r, global_stop, client_stop, true),
-    }
+    eprintln!("Control thread stopped");
 }
 
 fn find_gamepad(gamepads: &Gamepads, src: SocketAddr) -> Option<(DSType, String, File, File)> {
@@ -190,65 +140,58 @@ fn find_gamepad(gamepads: &Gamepads, src: SocketAddr) -> Option<(DSType, String,
 
 fn create_input_thread(
     src: SocketAddr,
-    gamepad_hidraw: String,
     gamepad_type: DSType,
-    global_stop: &Arc<AtomicBool>,
-    client_stop: &Arc<AtomicBool>,
+    global_stop: Arc<AtomicBool>,
+    client_stop: Arc<AtomicBool>,
     sock_w: UdpSocket,
     f_read: File,
     s: &Sender<ControlType>,
 ) -> Option<()> {
-    eprintln!(
-        "Starting thread for handling new client {} with gamepad {}",
-        src, gamepad_hidraw
-    );
-    let send_thread_name = format!("send_to_client {}", src);
+    let send_thread_name = format!("send_to_client_{}", src);
     let global_stop = Arc::clone(&global_stop);
     let client_stop = Arc::clone(&client_stop);
-    let battery_sender = s.clone();
+    let sender = s.clone();
+    let f: SendFunc = match gamepad_type {
+        DSType::DS4BT => send_to_client::<DS4PacketBT>,
+        DSType::DS4USB => send_to_client::<DS4PacketUSB>,
+        DSType::SenseBT => send_to_client::<DSensePacketBT>,
+        DSType::SenseUSB => send_to_client::<DSensePacketUSB>,
+    };
     if let Err(err) = thread::Builder::new()
         .name(send_thread_name)
-        .spawn(move || {
-            send_to_client(
-                src,
-                sock_w,
-                f_read,
-                gamepad_type,
-                global_stop,
-                client_stop,
-                battery_sender,
-            )
-        })
+        .spawn(move || f(src, sock_w, f_read, global_stop, client_stop, sender))
     {
         eprintln!("Error in creating thread for client {}: {}", src, err);
         return None;
     }
+    s.send(ControlType::Color { r: 0, g: 255, b: 0 }).unwrap();
+    thread::sleep(Duration::from_secs(1));
+    s.send(ControlType::Color { r: 0, g: 0, b: 255 }).unwrap();
     Some(())
 }
 
 fn create_control_thread(
     src: SocketAddr,
     gamepad_type: DSType,
-    global_stop: Arc<AtomicBool>,
-    client_stop: Arc<AtomicBool>,
+    global_stop: &Arc<AtomicBool>,
+    client_stop: &Arc<AtomicBool>,
     f_write: File,
     r: Receiver<ControlType>,
 ) -> Option<()> {
-    eprintln!("Starting control thread for {}", src);
-    let control_thread_name = format!("handle_control {}", src);
-    let global_stop_thread = Arc::clone(&global_stop);
-    let client_stop_thread = Arc::clone(&client_stop);
+    let control_thread_name = format!("handle_control_{}", src);
+    let global_stop = Arc::clone(global_stop);
+    let client_stop_thread = Arc::clone(client_stop);
+    let x: (ControlFunc, bool) = match gamepad_type {
+        DSType::DS4USB => (control_dsc::<DS4Controls>, false),
+        DSType::DS4BT => (control_dsc::<DS4Controls>, true),
+        DSType::SenseUSB => (control_dsc::<DSenseControls>, false),
+        DSType::SenseBT => (control_dsc::<DSenseControls>, true),
+    };
+    // NOTE: until https://github.com/rust-lang/rfcs/issues/2870 is fixed and in stable
+    let (f, is_bt) = x;
     if let Err(err) = thread::Builder::new()
         .name(control_thread_name)
-        .spawn(move || {
-            control_gamepad(
-                gamepad_type,
-                f_write,
-                r,
-                global_stop_thread,
-                client_stop_thread,
-            )
-        })
+        .spawn(move || f(f_write, r, global_stop, client_stop_thread, is_bt))
     {
         eprintln!(
             "Error in creating control thread for client {}: {}",
@@ -267,7 +210,7 @@ fn handle_new_client(
     gamepads: &Gamepads,
     global_stop: Arc<AtomicBool>,
 ) {
-    let (gamepad_type, gamepad_hidraw, f_read, f_write) = match find_gamepad(&gamepads, src) {
+    let (gamepad_type, gamepad_hidraw, f_read, f_write) = match find_gamepad(gamepads, src) {
         Some((gamepad_type, gamepad_hidraw, f_read, f_write)) => {
             (gamepad_type, gamepad_hidraw, f_read, f_write)
         }
@@ -277,12 +220,19 @@ fn handle_new_client(
     eprintln!("Gamepads after connect {:?}", gamepads);
     let client_stop = Arc::new(AtomicBool::new(false));
     let (s, r) = unbounded();
+    eprintln!("Starting control thread for {} {}", src, gamepad_hidraw);
+    if create_control_thread(src, gamepad_type, &global_stop, &client_stop, f_write, r).is_none() {
+        return;
+    };
+    eprintln!(
+        "Starting thread for handling new client {} with gamepad {}",
+        src, gamepad_hidraw
+    );
     if create_input_thread(
         src,
-        gamepad_hidraw,
         gamepad_type,
-        &global_stop,
-        &client_stop,
+        global_stop,
+        client_stop,
         sock_w,
         f_read,
         &s,
@@ -291,41 +241,23 @@ fn handle_new_client(
     {
         return;
     }
-    if create_control_thread(src, gamepad_type, global_stop, client_stop, f_write, r).is_none() {
-        return;
-    };
-    s.send(ControlType::Rumble {
-        large: 0,
-        small: 255,
-    })
-    .unwrap();
-    thread::sleep(Duration::from_secs(1));
-    s.send(ControlType::Color { r: 0, g: 0, b: 255 }).unwrap();
-    s.send(ControlType::Rumble { large: 0, small: 0 }).unwrap();
-    clients.insert(src, s.clone());
+    clients.insert(src, s);
 }
 
 fn handle_rumble(clients: &Clients, src: SocketAddr, large: u8, small: u8) {
-    clients.get(&src).and_then(|sender| {
-        sender
-            .send(ControlType::Rumble {
-                large: large,
-                small: small,
-            })
-            .unwrap();
-        Some(())
-    });
+    if let Some(sender) = clients.get(&src) {
+        sender.send(ControlType::Rumble { large, small }).unwrap();
+    };
 }
 
 fn handle_disconnect(addr: SocketAddr, clients: &mut Clients, gamepads: &Gamepads) {
-    let _ = clients.remove(&addr);
-    match gamepads
+    clients.remove(&addr);
+    if let Some((_syspath, gamepad)) = gamepads
         .write()
         .iter_mut()
         .find(|(_k, v)| v.used_by == Some(addr))
     {
-        Some((_syspath, gamepad)) => gamepad.used_by = None,
-        None => (),
+        gamepad.used_by = None;
     }
     eprintln!(
         "Client {} disconnected gracefully {:?}",
