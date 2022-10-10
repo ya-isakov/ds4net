@@ -41,28 +41,27 @@ pub enum ControlType {
     Battery(u8),
 }
 
-fn find_and_open_gamepad(
-    gamepads: &Gamepads,
-    src: SocketAddr,
-) -> Option<(DSType, String, File, File)> {
+fn find_and_open_gamepad(gamepads: &Gamepads, src: SocketAddr) -> Option<(DSType, File, File)> {
     let mut locked_gamepads = gamepads.write();
-    let (_syspath, gamepad) = locked_gamepads
-        .iter_mut()
-        .find(|(_k, v)| v.used_by.is_none())?;
+    // gamepad is not mut, because it stores &mut, so it works via interior mutability
+    let gamepad = locked_gamepads.values_mut().find(|v| v.used_by.is_none())?;
     gamepad.used_by = Some(src);
-    let f_write = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&gamepad.hidraw_path)
-        .unwrap();
-    let f_read = f_write.try_clone().unwrap();
-    //syspath.to_string(),
-    Some((
-        gamepad.gamepad_type,
-        gamepad.hidraw_path.to_string(),
-        f_read,
-        f_write,
-    ))
+    let path = &gamepad.path;
+    let f_write = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(f_write) => f_write,
+        Err(e) => {
+            eprintln!("Error on opening {}: {}", path, e);
+            return None;
+        }
+    };
+    let f_read = match f_write.try_clone() {
+        Ok(f_read) => f_read,
+        Err(e) => {
+            eprintln!("Error on cloning fd for {}: {}", path, e);
+            return None;
+        }
+    };
+    Some((gamepad.ds_type, f_read, f_write))
 }
 
 fn send_to_client<T: Packet + Default>(
@@ -83,7 +82,9 @@ fn send_to_client<T: Packet + Default>(
                 let capacity = packet.battery_capacity();
                 if capacity != bat_level {
                     eprintln!("Battery level changed for {} to {}%", addr, capacity);
-                    sender.send(ControlType::Battery(capacity)).unwrap();
+                    if let Err(e) = sender.send(ControlType::Battery(capacity)) {
+                        eprintln!("Error sending battery state to control thread: {}", e);
+                    }
                     bat_level = capacity;
                 }
                 new_packet = packet.to_ds4_packet();
@@ -99,8 +100,8 @@ fn send_to_client<T: Packet + Default>(
             break;
         };
     }
-    eprintln!("Input thread stopped for {}", addr);
     client_stop.store(true, Ordering::SeqCst);
+    eprintln!("Input thread stopped for {}", addr);
 }
 
 fn create_input_thread(
@@ -116,7 +117,13 @@ fn create_input_thread(
     let global_stop = Arc::clone(global_stop);
     let client_stop = Arc::clone(client_stop);
     let sender = s.clone();
-    let sock_w = socket.try_clone().unwrap();
+    let sock_w = match socket.try_clone() {
+        Ok(sock_w) => sock_w,
+        Err(e) => {
+            eprintln!("Error on cloning socket for client {}: {}", src, e);
+            return None;
+        }
+    };
     let f: SendFunc = match ds_type {
         DSType::DS4BT => send_to_client::<DS4PacketBT>,
         DSType::DS4USB => send_to_client::<DS4PacketUSB>,
@@ -130,9 +137,10 @@ fn create_input_thread(
         eprintln!("Error creating input thread for client {}: {}", src, err);
         return None;
     }
-    s.send(ControlType::Color { r: 0, g: 255, b: 0 }).unwrap();
+    // ignoring result, as we don't care, now
+    s.send(ControlType::Color { r: 0, g: 255, b: 0 }).ok();
     thread::sleep(Duration::from_secs(1));
-    s.send(ControlType::Color { r: 0, g: 0, b: 255 }).unwrap();
+    s.send(ControlType::Color { r: 0, g: 0, b: 255 }).ok();
     Some(())
 }
 
@@ -159,9 +167,11 @@ fn control_dsc<T: Controls + Default>(
                     }
                 }
                 if is_bt {
-                    dsc.write_packet_bt(&mut f_write).unwrap()
-                } else {
-                    dsc.write_packet_usb(&mut f_write).unwrap()
+                    if let Err(e) = dsc.write_packet_bt(&mut f_write) {
+                        eprintln!("Error on writing BT packet: {}", e);
+                    }
+                } else if let Err(e) = dsc.write_packet_usb(&mut f_write) {
+                    eprintln!("Error on writing USB packet: {}", e);
                 }
             }
             Err(RecvTimeoutError::Timeout) => (),
@@ -211,37 +221,37 @@ fn handle_new_client(
     gamepads: &Gamepads,
     global_stop: &Arc<AtomicBool>,
 ) {
-    let (ds_type, hidraw, f_read, f_write) = match find_and_open_gamepad(gamepads, src) {
-        Some((ds_type, hidraw, f_read, f_write)) => (ds_type, hidraw, f_read, f_write),
+    let (ds_type, f_read, f_write) = match find_and_open_gamepad(gamepads, src) {
+        Some(x) => x,
         None => return,
     };
-    eprintln!("New client connected {:?}", clients);
-    eprintln!("Gamepads after connect {:?}", gamepads);
     let client_stop = Arc::new(AtomicBool::new(false));
     let (s, r) = unbounded();
-    eprintln!("Starting control thread for {} {}", src, hidraw);
     if create_control_thread(src, ds_type, global_stop, &client_stop, f_write, r).is_none() {
         return;
     };
-    eprintln!("Starting input thread for {}, gamepad {}", src, hidraw);
     if create_input_thread(src, ds_type, global_stop, &client_stop, socket, f_read, &s).is_none() {
         return;
     }
     clients.insert(src, s);
+    eprintln!("New client connected {:?}", clients);
+    eprintln!("Gamepads after connect {:?}", gamepads);
 }
 
 fn handle_rumble(clients: &Clients, src: SocketAddr, large: u8, small: u8) {
     if let Some(sender) = clients.get(&src) {
-        sender.send(ControlType::Rumble { large, small }).unwrap();
+        if let Err(e) = sender.send(ControlType::Rumble { large, small }) {
+            eprintln!("Error sending rumble to control thread: {}", e);
+        }
     };
 }
 
 fn handle_disconnect(addr: SocketAddr, clients: &mut Clients, gamepads: &Gamepads) {
     clients.remove(&addr);
-    if let Some((_syspath, gamepad)) = gamepads
+    if let Some(gamepad) = gamepads
         .write()
-        .iter_mut()
-        .find(|(_k, v)| v.used_by == Some(addr))
+        .values_mut()
+        .find(|v| v.used_by == Some(addr))
     {
         gamepad.used_by = None;
     }

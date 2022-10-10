@@ -25,8 +25,8 @@ pub type Gamepads = Arc<RwLock<HashMap<String, DSGamepad>>>;
 
 #[derive(Debug)]
 pub struct DSGamepad {
-    pub gamepad_type: DSType,
-    pub hidraw_path: String,
+    pub ds_type: DSType,
+    pub path: String,
     pub used_by: Option<SocketAddr>,
 }
 
@@ -82,7 +82,7 @@ fn filter_gamepads(device: udev::Device) -> Option<DSGamepad> {
 
     let devname = device.property_value("DEVNAME")?;
     let devname_str = devname.to_str()?;
-    let hidraw_path = String::from(devname_str);
+    let path = String::from(devname_str);
     let map = HashMap::from([
         (
             ID_DS4V2,
@@ -94,8 +94,8 @@ fn filter_gamepads(device: udev::Device) -> Option<DSGamepad> {
         ),
     ]);
     Some(DSGamepad {
-        gamepad_type: map.get(ids[2])?[&is_bt],
-        hidraw_path,
+        ds_type: map.get(ids[2])?[&is_bt],
+        path,
         used_by: None,
     })
 }
